@@ -71,6 +71,60 @@
       fallback("Details unavailable (" + err.message + ") but the player is loaded.");
     }
   }
+  
+  // ---------------- Events ----------------
+  $("search-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = input.value.trim();
+    if (q) search(q, 1);
+  });
+
+  $("id-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const raw = $("manual-id").value.trim();
+    if (!/^\d+$/.test(raw)) {
+      hero.hidden = true; home.hidden = true;
+      setState("A TMDB ID is numbers only, for example 299534.", "error");
+      return;
+    }
+    selectMovie(parseInt(raw, 10));
+  });
+
+  $("home-link").addEventListener("click", (e) => { e.preventDefault(); resetHome(); });
+  $("close-player").addEventListener("click", closePlayer);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closePlayer(); });
+  window.addEventListener("scroll", () => topbar.classList.toggle("scrolled", window.scrollY > 40), { passive: true });
+
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    const play = t.closest("[data-play]");
+    if (play) return selectMovie(Number(play.dataset.play));
+    if (t.closest("[data-mute]")) return toggleMute();
+    const dot = t.closest("[data-slide]");
+    if (dot) { showSlide(Number(dot.dataset.slide)); return startTimer(); }
+    const pill = t.closest(".pill");
+    if (pill) {
+      document.querySelectorAll(".pill").forEach((p) => p.classList.toggle("active", p === pill));
+      const gid = Number(pill.dataset.genre);
+      if (gid === 0) return resetHome();
+      hero.hidden = !slides.length; return showGenre(gid, pill.textContent, 1);
+    }
+    const nav = t.closest("[data-scroll]");
+    if (nav) {
+      e.preventDefault();
+      if (home.hidden) resetHome();
+      const target = $(nav.dataset.scroll);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    const card = t.closest(".card");
+    if (card) return selectMovie(Number(card.dataset.id));
+    if (t.id === "more") return showGenre(genreId, genreName, genrePage + 1);
+    if (t.id === "prev" || t.id === "next") return search(currentQuery, Number(t.dataset.page));
+  });
+
+  loadHome();
+})();
 
 
   // ---------------- Scroll reveal (skipped when the user prefers reduced motion) ----------------
