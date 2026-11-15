@@ -7,8 +7,6 @@
   const REGION = "IN";                 // ISO 3166-1 country code for "Where to watch"
   const CONTACT = "you@example.com";   // shown in the contact section
   const IMG = "https://image.tmdb.org/t/p/";
-  // Where the TMDB proxy lives. Default: the Vercel function. To use a Cloudflare Worker instead,
-  // set this to its URL, e.g. "https://thrilx-api.your-name.workers.dev"
   const API_BASE = "/api/tmdb";
 
   // Iframe embed base URL (from script 3)
@@ -51,9 +49,10 @@
   reveal($$(".band"));
 
   const hero = $("#hero"), main = $("#main"), home = $("#home"), results = $("#results"), viewTitle = $("#view-title");
+  const playerModal = $("#player-modal"), player = $("#player"), playerLoading = $("#player-loading"), playerBar = $("#player-bar"), detailsBox = $("#details");
   const spinner = '<div class="state"><div class="spinner"></div>Loading…</div>';
 
-  // Ensure #hero-video exists inside #hero (auto-injected if missing from HTML)
+  // Ensure #hero-video exists inside #hero
   if (hero && !$("#hero-video")) {
     const bg = $("#hero-bg");
     if (bg) bg.insertAdjacentHTML("afterend", '<div id="hero-video" class="hero-video" aria-hidden="true"></div>');
@@ -152,7 +151,11 @@
   function showHero(on) {
     hero.hidden = !on;
     main.classList.toggle("nohero", !on);
-    if (!on) setVideo(null);
+    if (on) {
+      heroVisible = true;
+    } else {
+      setVideo(null);
+    }
   }
 
   async function showView(name) {
@@ -204,8 +207,12 @@
     if (cacheKey in trailerCache) return trailerCache[cacheKey];
     try {
       const d = await api("/" + type + "/" + id + "/videos");
-      const yt = (d.results || []).filter((v) => v.site === "YouTube");
-      const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
+      const yt = (d.results || []).filter((v) => v.site === "YouTube" && v.key);
+      const pick =
+        yt.find((v) => v.type === "Trailer" && v.official) ||
+        yt.find((v) => v.type === "Trailer") ||
+        yt.find((v) => v.type === "Teaser") ||
+        yt[0];
       return (trailerCache[cacheKey] = pick ? pick.key : null);
     } catch {
       return (trailerCache[cacheKey] = null);
@@ -226,12 +233,16 @@
     box.dataset.key = key;
     heroMuted = true;
     updateMuteButton();
+
+    const originParam = location.origin.startsWith("http") ? "&origin=" + encodeURIComponent(location.origin) : "";
     box.innerHTML =
-      '<iframe title="Trailer" allow="autoplay; encrypted-media" src="https://www.youtube.com/embed/' +
+      '<iframe title="Trailer" allow="autoplay; encrypted-media" referrerpolicy="origin" src="https://www.youtube.com/embed/' +
       encodeURIComponent(key) +
       "?autoplay=1&mute=1&controls=0&loop=1&playlist=" +
       encodeURIComponent(key) +
-      '&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3"></iframe>';
+      "&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3" +
+      originParam +
+      '"></iframe>';
     box.firstChild.addEventListener("load", () => box.classList.add("on"));
   }
 
@@ -245,7 +256,7 @@
 
   function toggleMute() {
     const frame = $("#hero-video iframe");
-    if (!frame) return;
+    if (!frame || !frame.contentWindow) return;
     heroMuted = !heroMuted;
     frame.contentWindow.postMessage(
       JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
@@ -257,10 +268,11 @@
   if ("IntersectionObserver" in window && hero) {
     new IntersectionObserver(
       (entries) => {
+        if (hero.hidden) return;
         heroVisible = entries[0].isIntersecting;
         setVideo(currentKey);
       },
-      { threshold: 0.25 }
+      { threshold: 0.2 }
     ).observe(hero);
   }
 
@@ -268,7 +280,9 @@
     slides = list.filter((m) => m.backdrop).slice(0, 6);
     if (!slides.length) return;
     $("#hero-dots").innerHTML = slides.map((_, i) => '<button class="dot" data-slide="' + i + '" type="button" aria-label="Slide ' + (i + 1) + '"></button>').join("");
-    showHero(true); showSlide(0); startTimer();
+    showHero(true);
+    showSlide(0);
+    startTimer();
   }
 
   async function showSlide(i) {
@@ -281,7 +295,9 @@
       '<div class="eyebrow">Trending #' + (idx + 1) + " · " + typeLabel(m.type) + "</div><h1>" + esc(m.title) + "</h1>" +
       '<div class="chips">' + (m.rating ? "<span>" + ICONS.star + m.rating.toFixed(1) + "</span>" : "") + "<span>" + year(m.date) + "</span><span>" + typeLabel(m.type) + "</span></div>" +
       "<p>" + esc(m.overview) + "</p>" +
-      '<div class="actions"><button class="btn-watch" data-detail data-autoplay="1" data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + 'Watch Now</button>' +
+      '<div class="actions">' +
+      '<button class="btn-watch" data-watch data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + "Watch Now</button>" +
+      '<button class="pill-btn" data-detail data-type="' + m.type + '" data-id="' + m.id + '" type="button">Details</button>' +
       '<button class="btn-round" data-fav data-type="' + m.type + '" data-id="' + m.id + '" type="button" aria-label="Toggle my list">' + ICONS.heart + "</button>" +
       '<button class="btn-round" data-mute type="button" aria-label="Unmute trailer">' + ICONS.mute + "</button></div>";
     const next = [1, 2, 3, 4].map((n) => (idx + n) % slides.length).filter((n) => n !== idx);
@@ -304,14 +320,14 @@
   function startTimer() {
     clearInterval(timer);
     timer = setInterval(() => {
-      if (!heroPaused && heroVisible && !hero.hidden && !document.hidden && $("#detail").hidden && slides.length > 1) {
+      if (!heroPaused && heroVisible && !hero.hidden && !document.hidden && $("#detail").hidden && playerModal.hidden && slides.length > 1) {
         showSlide(idx + 1);
       }
     }, 30000);
   }
 
-  // ---------------- Iframe Player (from script 3) ----------------
-  let currentSeasons = [];
+  // ---------------- Dedicated Watch Scene (#player-modal from script 3) ----------------
+  let selectedId = null, selectedType = "movie", playerSeasons = [];
 
   function buildEmbedUrl(type, id, season = 1, episode = 1) {
     const cleanId = parseInt(id, 10);
@@ -321,16 +337,17 @@
     return EMBED_BASE + "/movie/" + cleanId;
   }
 
-  function renderPlayer(type, id, season = 1, episode = 1) {
-    const box = $("#dt-trailer");
-    if (!box) return;
+  function loadEmbedSrc(type, id, season = 1, episode = 1) {
+    const src = buildEmbedUrl(type, id, season, episode);
+    playerLoading.classList.remove("hidden");
+    player.onload = () => playerLoading.classList.add("hidden");
+    player.src = src;
 
-    let controlsHtml = "";
-    if (type === "tv" && currentSeasons.length) {
-      const activeSeason = currentSeasons.find((s) => s.season_number === Number(season)) || currentSeasons[0];
+    if (type === "tv" && playerSeasons.length) {
+      const activeSeason = playerSeasons.find((s) => s.season_number === Number(season)) || playerSeasons[0];
       const epCount = Math.max(1, activeSeason ? activeSeason.episode_count : 1);
 
-      const seasonOpts = currentSeasons
+      const seasonOpts = playerSeasons
         .map((s) => '<option value="' + s.season_number + '"' + (s.season_number === Number(season) ? " selected" : "") + ">Season " + s.season_number + "</option>")
         .join("");
 
@@ -338,30 +355,83 @@
         .map((ep) => '<option value="' + ep + '"' + (ep === Number(episode) ? " selected" : "") + ">Episode " + ep + "</option>")
         .join("");
 
-      controlsHtml =
-        '<div class="actions wrap" style="margin-bottom: 12px;">' +
-        '<select id="player-season" class="pill-btn" data-id="' + id + '" aria-label="Select season">' + seasonOpts + "</select>" +
-        '<select id="player-episode" class="pill-btn" data-id="' + id + '" aria-label="Select episode">' + epOpts + "</select>" +
+      playerBar.innerHTML =
+        '<div class="player-selects">' +
+        '<select id="player-season" data-id="' + id + '" aria-label="Select season">' + seasonOpts + "</select>" +
+        '<select id="player-episode" data-id="' + id + '" aria-label="Select episode">' + epOpts + "</select>" +
         "</div>";
+    } else {
+      playerBar.innerHTML = "";
     }
-
-    const src = buildEmbedUrl(type, id, season, episode);
-    box.innerHTML =
-      controlsHtml +
-      '<div class="trailer">' +
-      '<iframe id="embed-player" title="Video Player" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="origin" src="' + esc(src) + '"></iframe>' +
-      "</div>";
   }
 
-  // ---------------- Detail ----------------
+  async function openPlayerScene(type, id) {
+    selectedType = type;
+    selectedId = id;
+    playerSeasons = [];
+
+    // Hide any open overlays before showing the dedicated player scene
+    $$(".overlay").forEach((o) => { o.hidden = true; });
+    $("#dt-body").innerHTML = "";
+
+    heroPaused = true;
+    setVideo(null);
+
+    playerModal.hidden = false;
+    document.body.classList.add("no-scroll");
+    playerModal.scrollTop = 0;
+
+    loadEmbedSrc(type, id, 1, 1);
+    detailsBox.innerHTML = '<div></div><div class="meta">Loading details…</div>';
+
+    try {
+      const m = await api("/" + type + "/" + id);
+      if (selectedId !== id || selectedType !== type) return;
+
+      const title = m.title || m.name || "Untitled";
+      const relDate = m.release_date || m.first_air_date || "";
+      const run = type === "tv"
+        ? (m.number_of_seasons ? m.number_of_seasons + (m.number_of_seasons > 1 ? " seasons" : " season") : "")
+        : (m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "");
+
+      if (type === "tv") {
+        playerSeasons = (m.seasons || []).filter((s) => s.season_number > 0);
+        loadEmbedSrc(type, id, 1, 1);
+      }
+
+      detailsBox.innerHTML =
+        "<div>" + (m.poster_path ? '<img src="' + IMG + "w342" + m.poster_path + '" alt="Poster for ' + esc(title) + '">' : "") + "</div>" +
+        "<div><h2>" + esc(title) + "</h2>" +
+        '<div class="meta">' + [year(relDate), run, m.vote_average ? "<b>" + ICONS.star + m.vote_average.toFixed(1) + "</b>" : "", "TMDB ID " + m.id, typeLabel(type)].filter(Boolean).join(" · ") + "</div>" +
+        '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
+        '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div></div>";
+    } catch (err) {
+      if (selectedId !== id || selectedType !== type) return;
+      detailsBox.innerHTML = "<div></div><div><h2>TMDB ID " + id + '</h2><div class="meta">Details unavailable (' + esc(err.message) + ") but the player is loaded.</div></div>";
+    }
+  }
+
+  function closePlayerScene() {
+    if (playerModal.hidden) return;
+    playerModal.hidden = true;
+    player.src = "about:blank";
+    playerBar.innerHTML = "";
+    selectedId = null;
+    if (!$$(".overlay").some((x) => !x.hidden) && intro.hidden) {
+      document.body.classList.remove("no-scroll");
+      heroPaused = false;
+      setVideo(currentKey);
+    }
+  }
+
+  // ---------------- Detail Modal ----------------
   let current = null;
-  async function openDetail(type, id, autoplay = false) {
+  async function openDetail(type, id) {
     const body = $("#dt-body");
     body.innerHTML = spinner; openOverlay("detail");
     try {
       const m = await api("/" + type + "/" + id, { append_to_response: "videos,credits,watch/providers" });
       current = norm({ ...m, media_type: type }, type);
-      currentSeasons = type === "tv" ? (m.seasons || []).filter((s) => s.season_number > 0) : [];
 
       const yt = (m.videos?.results || []).filter((v) => v.site === "YouTube");
       const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
@@ -396,7 +466,6 @@
         '<h3 class="sub">Where to watch in ' + REGION + "</h3>" + provHtml +
         (cast ? '<h3 class="sub">Cast</h3><div class="cast">' + cast + "</div>" : "") + "</div></div>";
       syncFav();
-      if (autoplay) renderPlayer(type, id, 1, 1);
     } catch (err) { body.innerHTML = stateHtml(esc(err.message), "error"); }
   }
 
@@ -410,12 +479,15 @@
   function closeOverlay(o) {
     o.hidden = true;
     if (o.id === "detail") $("#dt-body").innerHTML = "";
-    if (!$$(".overlay").some((x) => !x.hidden)) {
+    if (!$$(".overlay").some((x) => !x.hidden) && playerModal.hidden) {
       if (intro.hidden) document.body.classList.remove("no-scroll");
       heroPaused = false; setVideo(currentKey);
     }
   }
-  const closeOverlays = () => $$(".overlay").forEach(closeOverlay);
+  const closeOverlays = () => {
+    $$(".overlay").forEach(closeOverlay);
+    closePlayerScene();
+  };
 
   // ---------------- Share ----------------
   const shareData = { title: "Thrilx", text: "Find what to watch, and where to watch it.", url: location.origin };
@@ -431,12 +503,19 @@
   const intro = $("#intro");
   function hideIntro() {
     document.body.classList.add("ready"); intro.classList.add("leaving");
-    setTimeout(() => { intro.hidden = true; if (!$$(".overlay").some((x) => !x.hidden)) document.body.classList.remove("no-scroll"); }, 800);
+    setTimeout(() => {
+      intro.hidden = true;
+      if (!$$(".overlay").some((x) => !x.hidden) && playerModal.hidden) {
+        document.body.classList.remove("no-scroll");
+        heroPaused = false;
+        setVideo(currentKey);
+      }
+    }, 800);
     try { sessionStorage.setItem("thrilx-intro", "1"); } catch { /* ignore */ }
   }
   let seen = false;
   try { seen = sessionStorage.getItem("thrilx-intro") === "1"; } catch { /* ignore */ }
-  if (seen) { intro.hidden = true; document.body.classList.add("ready"); } else document.body.classList.add("no-scroll");
+  if (seen) { intro.hidden = true; document.body.classList.add("ready"); } else { document.body.classList.add("no-scroll"); heroPaused = true; }
   $("#enter").addEventListener("click", hideIntro);
   $("#skip-intro").addEventListener("click", hideIntro);
 
@@ -449,18 +528,20 @@
   $("#to-top").addEventListener("click", (e) => { e.preventDefault(); window.scrollTo({ top: 0 }); });
   $("#hero-prev").addEventListener("click", () => { showSlide(idx - 1); startTimer(); });
   $("#hero-next").addEventListener("click", () => { showSlide(idx + 1); startTimer(); });
+  $("#close-player").addEventListener("click", closePlayerScene);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeOverlays(); });
   window.addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", window.scrollY > 40), { passive: true });
   $$(".overlay").forEach((o) => o.addEventListener("click", (e) => { if (e.target === o) closeOverlay(o); }));
+  playerModal.addEventListener("click", (e) => { if (e.target === playerModal) closePlayerScene(); });
 
   document.addEventListener("change", (e) => {
     const t = e.target;
     if (t.id === "player-season") {
-      renderPlayer("tv", Number(t.dataset.id), Number(t.value), 1);
+      loadEmbedSrc("tv", Number(t.dataset.id), Number(t.value), 1);
     } else if (t.id === "player-episode") {
       const seasonSel = $("#player-season");
       const season = seasonSel ? Number(seasonSel.value) : 1;
-      renderPlayer("tv", Number(t.dataset.id), season, Number(t.value));
+      loadEmbedSrc("tv", Number(t.dataset.id), season, Number(t.value));
     }
   });
 
@@ -478,7 +559,7 @@
     }
     const watch = t.closest("[data-watch]");
     if (watch) {
-      renderPlayer(watch.dataset.type, Number(watch.dataset.id), 1, 1);
+      openPlayerScene(watch.dataset.type, Number(watch.dataset.id));
       return;
     }
     const tr = t.closest("[data-trailer]");
@@ -488,7 +569,7 @@
       return;
     }
     const sl = t.closest("[data-slide]"); if (sl) { showSlide(Number(sl.dataset.slide)); return startTimer(); }
-    const d = t.closest("[data-detail]"); if (d) return openDetail(d.dataset.type, Number(d.dataset.id), d.dataset.autoplay === "1");
+    const d = t.closest("[data-detail]"); if (d) return openDetail(d.dataset.type, Number(d.dataset.id));
   });
 
   syncFav();
