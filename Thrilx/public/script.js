@@ -1,6 +1,10 @@
 (() => {
   "use strict";
 
+  // Prevent double-execution if script is included or pasted twice
+  if (window.__THRILX_INIT__) return;
+  window.__THRILX_INIT__ = true;
+
   // ---------------------------------------------------------------
   // CONFIG
   // ---------------------------------------------------------------
@@ -29,7 +33,7 @@
     return m + ":" + String(r).padStart(2, "0");
   }
 
-  // ---------------- Vector icons ----------------
+  // ---------------- Vector icons (Deduplicated) ----------------
   const svg = (inner, cls = "") => '<svg class="ic ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + inner + "</svg>";
   const line = (inner) => '<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' + inner + "</g>";
   const HEART = "M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z";
@@ -47,7 +51,10 @@
     mute: svg(line('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>')),
     unmute: svg(line('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>')),
   };
-  $$("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || ""));
+  $$("[data-icon]").forEach((el) => {
+    $$("svg.ic", el).forEach((old) => old.remove());
+    el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || "");
+  });
 
   // ---------------- Scroll reveal ----------------
   const io = "IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -155,7 +162,6 @@
 
       if (!selectedId) return;
 
-      // Extract progress fields from common player message formats
       const payload = data.data || data;
       const currentTime = Number(payload.currentTime ?? payload.time ?? payload.progress ?? payload.watched ?? 0);
       const duration = Number(payload.duration ?? payload.total ?? 0);
@@ -560,26 +566,28 @@
     player.onload = () => playerLoading.classList.add("hidden");
     player.src = src;
 
-    if (type === "tv") {
-      playerBar.innerHTML =
-        '<span class="chips"><span>Playing Season ' + activeSeasonNum + " · Episode " + activeEpisodeNum + "</span></span>";
-    } else {
-      playerBar.innerHTML = '<span class="chips"><span>Feature Film</span></span>';
+    if (playerBar) {
+      if (type === "tv") {
+        playerBar.innerHTML =
+          '<span class="chips"><span>Playing Season ' + activeSeasonNum + " · Episode " + activeEpisodeNum + "</span></span>";
+      } else {
+        playerBar.innerHTML = '<span class="chips"><span>Feature Film</span></span>';
+      }
     }
 
-    // Highlight active episode card if rendered
-    $$(".ep-card", epGrid).forEach((card) => {
-      const isMatch = Number(card.dataset.season) === activeSeasonNum && Number(card.dataset.episode) === activeEpisodeNum;
-      card.classList.toggle("active", isMatch);
-      const badge = $(".ep-playing-badge", card);
-      if (isMatch && !badge) {
-        $(".ep-thumb", card)?.insertAdjacentHTML("beforeend", '<span class="ep-playing-badge">Playing</span>');
-      } else if (!isMatch && badge) {
-        badge.remove();
-      }
-    });
+    if (epGrid) {
+      $$(".ep-card", epGrid).forEach((card) => {
+        const isMatch = Number(card.dataset.season) === activeSeasonNum && Number(card.dataset.episode) === activeEpisodeNum;
+        card.classList.toggle("active", isMatch);
+        const badge = $(".ep-playing-badge", card);
+        if (isMatch && !badge) {
+          $(".ep-thumb", card)?.insertAdjacentHTML("beforeend", '<span class="ep-playing-badge">Playing</span>');
+        } else if (!isMatch && badge) {
+          badge.remove();
+        }
+      });
+    }
 
-    // Save initial watch state to Continue Watching
     if (current && Number(current.id) === Number(id)) {
       const existing = getSavedProgress(type, id);
       upsertContinueItem({
@@ -599,8 +607,11 @@
   }
 
   async function renderSeasonEpisodes(tvId, seasonNum) {
+    if (!epGrid) return;
     activeSeasonNum = Number(seasonNum);
-    $$(".season-pill", seasonPills).forEach((b) => b.classList.toggle("active", Number(b.dataset.seasonPill) === activeSeasonNum));
+    if (seasonPills) {
+      $$(".season-pill", seasonPills).forEach((b) => b.classList.toggle("active", Number(b.dataset.seasonPill) === activeSeasonNum));
+    }
     epGrid.innerHTML = '<div class="state"><div class="spinner"></div>Loading Season ' + activeSeasonNum + " episodes…</div>";
 
     const cacheKey = tvId + ":" + activeSeasonNum;
@@ -630,7 +641,9 @@
       return;
     }
 
-    seriesEpSummary.textContent = "Season " + activeSeasonNum + " · " + episodes.length + (episodes.length === 1 ? " Episode" : " Episodes");
+    if (seriesEpSummary) {
+      seriesEpSummary.textContent = "Season " + activeSeasonNum + " · " + episodes.length + (episodes.length === 1 ? " Episode" : " Episodes");
+    }
 
     epGrid.innerHTML = episodes.map((ep) => {
       const epNum = ep.episode_number;
@@ -675,7 +688,7 @@
     playerModal.scrollTop = 0;
     setVideo(null);
 
-    seriesBrowser.hidden = type !== "tv";
+    if (seriesBrowser) seriesBrowser.hidden = type !== "tv";
     updateProgressBadgeUI(saved);
     loadEmbedSrc(type, id, startSeason, startEpisode);
     detailsBox.innerHTML = '<div></div><div class="meta">Loading details…</div>';
@@ -691,7 +704,6 @@
         ? (m.number_of_seasons ? m.number_of_seasons + (m.number_of_seasons > 1 ? " seasons" : " season") : "")
         : (m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "");
 
-      // Save metadata to Continue Watching immediately
       upsertContinueItem({
         id: selectedId,
         type: selectedType,
@@ -704,7 +716,7 @@
         episode: activeEpisodeNum,
       });
 
-      if (type === "tv") {
+      if (type === "tv" && seasonPills) {
         playerSeasons = (m.seasons || []).filter((s) => s.season_number > 0);
         seasonPills.innerHTML = playerSeasons.map((s) =>
           '<button type="button" class="season-pill' + (s.season_number === activeSeasonNum ? " active" : "") + '" data-season-pill="' + s.season_number + '" data-id="' + id + '">Season ' + s.season_number + "</button>"
@@ -740,10 +752,10 @@
     if (playerModal.hidden) return;
     playerModal.hidden = true;
     player.src = "about:blank";
-    playerBar.innerHTML = "";
+    if (playerBar) playerBar.innerHTML = "";
     detailsBox.innerHTML = "";
-    epGrid.innerHTML = "";
-    seriesBrowser.hidden = true;
+    if (epGrid) epGrid.innerHTML = "";
+    if (seriesBrowser) seriesBrowser.hidden = true;
     selectedId = null;
     if (!isOverlayOpen()) {
       document.body.classList.remove("no-scroll");
@@ -853,16 +865,16 @@
   $("#hero-next").addEventListener("click", () => { showSlide(idx + 1); startTimer(); });
   $("#close-player").addEventListener("click", closePlayerScene);
 
-  // Topbar Scene Switcher inside #player-modal
-  $("#player-home-logo").addEventListener("click", (e) => { e.preventDefault(); closePlayerScene(); showView("discover"); });
-  $("#scene-home").addEventListener("click", () => { closePlayerScene(); });
-  $("#scene-details").addEventListener("click", () => {
+  // Optional Topbar Scene Switcher inside #player-modal
+  $("#player-home-logo")?.addEventListener("click", (e) => { e.preventDefault(); closePlayerScene(); showView("discover"); });
+  $("#scene-home")?.addEventListener("click", () => { closePlayerScene(); });
+  $("#scene-details")?.addEventListener("click", () => {
     if (!selectedId) return;
     const t = selectedType, i = selectedId;
     closePlayerScene();
     openDetail(t, i);
   });
-  $("#scene-player").addEventListener("click", () => {
+  $("#scene-player")?.addEventListener("click", () => {
     playerModal.scrollTo({ top: 0, behavior: "smooth" });
   });
 
@@ -877,13 +889,11 @@
     const op = t.closest("[data-open]"); if (op) return openOverlay(op.dataset.open);
     if (t.closest("[data-mute]")) return toggleMute();
 
-    // Clear all continue watching
     if (t.id === "cw-clear-all") {
       saveContinueList([]);
       refreshContinueRowDom();
       return;
     }
-    // Remove single continue watching item
     const cwRem = t.closest("[data-cw-remove]");
     if (cwRem) {
       e.stopPropagation();
@@ -891,14 +901,12 @@
       return;
     }
 
-    // Season pill click in Series Player
     const sPill = t.closest("[data-season-pill]");
     if (sPill) {
       renderSeasonEpisodes(Number(sPill.dataset.id), Number(sPill.dataset.seasonPill));
       return;
     }
 
-    // Individual Episode Card click in Series Player
     const epCard = t.closest("[data-ep-select]");
     if (epCard) {
       const tvId = Number(epCard.dataset.id);
