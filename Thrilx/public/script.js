@@ -10,11 +10,24 @@
   const API_BASE = "/api/tmdb";
   const EMBED_BASE = "https://vidstuck.cc/embed";
 
+  // Series & Movie Embed Query Params
+  const TV_EMBED_PARAMS = "nextEpisode=true&autoplayNextEpisode=true&episodeSelector=true&overlay=true&color=8B5CF6&branding=vidstuck&subtitle=english&server=valstrax";
+  const MOVIE_EMBED_PARAMS = "overlay=true&color=8B5CF6&branding=vidstuck&subtitle=english&server=valstrax";
+
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const year = (d) => (d ? d.slice(0, 4) : "TBA");
   const typeLabel = (t) => (t === "tv" ? "Series" : "Movie");
+
+  function fmtTime(sec) {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return h + ":" + String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
+    return m + ":" + String(r).padStart(2, "0");
+  }
 
   // ---------------- Vector icons ----------------
   const svg = (inner, cls = "") => '<svg class="ic ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + inner + "</svg>";
@@ -49,15 +62,10 @@
   const hero = $("#hero"), main = $("#main"), home = $("#home"), results = $("#results"), viewTitle = $("#view-title");
   const intro = $("#intro");
   const playerModal = $("#player-modal"), player = $("#player"), playerLoading = $("#player-loading"), playerBar = $("#player-bar"), detailsBox = $("#details");
+  const seriesBrowser = $("#series-browser"), seasonPills = $("#season-pills"), epGrid = $("#ep-grid"), seriesEpSummary = $("#series-ep-summary");
+  const progressPill = $("#player-progress-pill");
   const spinner = '<div class="state"><div class="spinner"></div>Loading…</div>';
 
-  // Ensure #hero-video exists inside #hero right after #hero-bg
-  if (hero && !$("#hero-video")) {
-    const bg = $("#hero-bg");
-    if (bg) bg.insertAdjacentHTML("afterend", '<div id="hero-video" class="hero-video" aria-hidden="true"></div>');
-  }
-
-  // Live check: is any modal or intro currently covering the page?
   function isOverlayOpen() {
     const anyOverlay = $$(".overlay").some((o) => !o.hidden);
     const playerOpen = playerModal && !playerModal.hidden;
@@ -88,6 +96,144 @@
     overview: m.overview,
   });
   const clean = (list, t) => (list || []).filter((m) => m.media_type !== "person").map((m) => norm(m, t));
+
+  // ---------------- Continue Watching & Progress Storage ----------------
+  const CW_KEY = "thrilx-continue";
+
+  function getContinueList() {
+    try { return JSON.parse(localStorage.getItem(CW_KEY) || "[]"); }
+    catch { return []; }
+  }
+  function saveContinueList(list) {
+    try { localStorage.setItem(CW_KEY, JSON.stringify(list.slice(0, 24))); }
+    catch { /* ignore */ }
+  }
+  function getSavedProgress(type, id) {
+    return getContinueList().find((x) => x.type === type && Number(x.id) === Number(id)) || null;
+  }
+  function upsertContinueItem(entry) {
+    const list = getContinueList();
+    const idx = list.findIndex((x) => x.type === entry.type && Number(x.id) === Number(entry.id));
+    const prev = idx >= 0 ? list[idx] : {};
+    const merged = {
+      ...prev,
+      ...entry,
+      episodes: { ...(prev.episodes || {}), ...(entry.episodes || {}) },
+      updatedAt: Date.now(),
+    };
+    if (idx >= 0) list.splice(idx, 1);
+    list.unshift(merged);
+    saveContinueList(list);
+    updateProgressBadgeUI(merged);
+    if (view === "discover") refreshContinueRowDom();
+  }
+  function removeContinueItem(type, id) {
+    const list = getContinueList().filter((x) => !(x.type === type && Number(x.id) === Number(id)));
+    saveContinueList(list);
+    if (view === "discover") refreshContinueRowDom();
+  }
+
+  function updateProgressBadgeUI(item) {
+    if (!progressPill) return;
+    if (!item || !selectedId || Number(item.id) !== Number(selectedId) || item.type !== selectedType) {
+      progressPill.hidden = true;
+      return;
+    }
+    const label = item.type === "tv"
+      ? "S" + (item.season || 1) + ":E" + (item.episode || 1) + (item.currentTime ? " · " + fmtTime(item.currentTime) : "")
+      : (item.currentTime ? "Saved " + fmtTime(item.currentTime) : "Watching");
+    progressPill.textContent = label;
+    progressPill.hidden = false;
+  }
+
+  // Listen for iframe progress messages from vidstuck.cc
+  window.addEventListener("message", function (event) {
+    if (typeof event.data !== "string") return;
+    try {
+      const data = JSON.parse(event.data);
+      console.log("Progress:", data);
+
+      if (!selectedId) return;
+
+      // Extract progress fields from common player message formats
+      const payload = data.data || data;
+      const currentTime = Number(payload.currentTime ?? payload.time ?? payload.progress ?? payload.watched ?? 0);
+      const duration = Number(payload.duration ?? payload.total ?? 0);
+      const season = Number(payload.season ?? activeSeasonNum ?? 1);
+      const episode = Number(payload.episode ?? activeEpisodeNum ?? 1);
+
+      if (currentTime > 0 || duration > 0 || payload.event === "timeupdate" || payload.type === "MEDIA_DATA") {
+        const epKey = "s" + season + "e" + episode;
+        const episodesUpdate = selectedType === "tv"
+          ? { [epKey]: { currentTime, duration, updatedAt: Date.now() } }
+          : {};
+
+        upsertContinueItem({
+          id: selectedId,
+          type: selectedType,
+          title: current?.title || "TMDB #" + selectedId,
+          poster: current?.poster || "",
+          backdrop: current?.backdrop || "",
+          date: current?.date || "",
+          rating: current?.rating || 0,
+          season: selectedType === "tv" ? season : 1,
+          episode: selectedType === "tv" ? episode : 1,
+          currentTime: currentTime > 0 ? currentTime : (getSavedProgress(selectedType, selectedId)?.currentTime || 0),
+          duration: duration > 0 ? duration : (getSavedProgress(selectedType, selectedId)?.duration || 0),
+          episodes: episodesUpdate,
+        });
+      }
+    } catch {
+      // Ignore invalid messages
+    }
+  });
+
+  function continueRowHtml() {
+    const list = getContinueList();
+    if (!list.length) return "";
+    const cards = list.map((it) => {
+      const imgPath = it.backdrop ? IMG + "w780" + it.backdrop : (it.poster ? IMG + "w342" + it.poster : "");
+      const pct = it.duration > 0 ? Math.min(98, Math.max(6, Math.round((it.currentTime / it.duration) * 100))) : 25;
+      const tag = it.type === "tv" ? "S" + (it.season || 1) + " · E" + (it.episode || 1) : "Movie";
+      const timeStr = it.currentTime > 0
+        ? fmtTime(it.currentTime) + (it.duration > 0 ? " / " + fmtTime(it.duration) : "")
+        : "Resume";
+
+      return (
+        '<div class="cw-card">' +
+        '<button class="cw-remove" type="button" data-cw-remove data-type="' + esc(it.type) + '" data-id="' + it.id + '" aria-label="Remove from Continue Watching">' + ICONS.x + "</button>" +
+        '<button class="cw-main" type="button" data-watch data-type="' + esc(it.type) + '" data-id="' + it.id + '" data-season="' + (it.season || 1) + '" data-episode="' + (it.episode || 1) + '">' +
+        '<div class="cw-thumb">' +
+        (imgPath ? '<img loading="lazy" src="' + imgPath + '" alt="">' : "") +
+        '<div class="cw-shade"></div>' +
+        '<div class="cw-play-badge">' + ICONS.play + "</div>" +
+        '<span class="cw-tag">' + esc(tag) + "</span>" +
+        '<span class="cw-time">' + esc(timeStr) + "</span>" +
+        '<div class="cw-bar"><div class="cw-bar-fill" style="width:' + pct + '%"></div></div>' +
+        "</div>" +
+        '<div class="cw-info"><div><div class="cw-title">' + esc(it.title) + '</div><div class="cw-sub">' + year(it.date) + " · " + typeLabel(it.type) + "</div></div></div>" +
+        "</button></div>"
+      );
+    }).join("");
+
+    return (
+      '<div class="row" id="cw-row">' +
+      '<div class="row-head"><h3 class="row-title">Continue watching</h3>' +
+      '<button type="button" class="row-clear" id="cw-clear-all">Clear all</button></div>' +
+      '<div class="row-scroll">' + cards + "</div></div>"
+    );
+  }
+
+  function refreshContinueRowDom() {
+    const existing = $("#cw-row");
+    const html = continueRowHtml();
+    if (existing) {
+      if (html) existing.outerHTML = html;
+      else existing.remove();
+    } else if (html && home.firstChild) {
+      home.insertAdjacentHTML("afterbegin", html);
+    }
+  }
 
   // ---------------- My list (localStorage) ----------------
   const KEY = "thrilx-list";
@@ -126,7 +272,6 @@
   const gridHtml = (list) => '<div class="grid">' + list.map(cardHtml).join("") + "</div>";
   const stateHtml = (msg, cls = "") => '<div class="state ' + cls + '">' + msg + "</div>";
 
-  // Helper to build Cast & Where to Watch HTML for both Detail Modal and Watch Scene
   function buildExtraDetailsHtml(m) {
     const prov = m["watch/providers"]?.results?.[REGION];
     const groups = [["flatrate", "Stream"], ["free", "Free"], ["ads", "Free with ads"], ["rent", "Rent"], ["buy", "Buy"]]
@@ -182,11 +327,8 @@
   function showHero(on) {
     hero.hidden = !on;
     main.classList.toggle("nohero", !on);
-    if (on) {
-      heroVisible = true;
-    } else {
-      setVideo(null);
-    }
+    if (on) heroVisible = true;
+    else setVideo(null);
   }
 
   async function showView(name) {
@@ -207,7 +349,8 @@
     try {
       const lists = await Promise.all(v.rows.map((r) => api(r[1], r[3] || {})));
       if (t !== token) return;
-      home.innerHTML = v.rows.map((r, i) => rowHtml(r[0], clean(lists[i].results, r[2]))).join("");
+      const cwHtml = name === "discover" ? continueRowHtml() : "";
+      home.innerHTML = cwHtml + v.rows.map((r, i) => rowHtml(r[0], clean(lists[i].results, r[2]))).join("");
       reveal($$(".row", home));
       if (v.hero) setupHero(clean(lists[0].results, "movie"));
     } catch (err) { if (t === token) home.innerHTML = stateHtml(esc(err.message), "error"); }
@@ -228,7 +371,7 @@
     } catch (err) { if (t === token) results.innerHTML = stateHtml(esc(err.message), "error"); }
   }
 
-  // ---------------- Hero with Background Trailer (from script 3) ----------------
+  // ---------------- Hero with Background Trailer ----------------
   let slides = [], idx = 0, timer = null;
   let heroVisible = true, currentKey = null, heroMuted = true;
   const trailerCache = {};
@@ -300,8 +443,6 @@
     if (!currentKey) return;
     const box = $("#hero-video");
     let frame = $("#hero-video iframe");
-
-    // If the trailer hasn't mounted yet, mount it first
     if (!frame && box) {
       setVideo(currentKey);
       frame = $("#hero-video iframe");
@@ -311,7 +452,6 @@
     heroMuted = !heroMuted;
     updateMuteButton();
 
-    // Send YouTube IFrame API command + volume=100
     try {
       frame.contentWindow.postMessage(
         JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
@@ -328,7 +468,6 @@
         );
       }
     } catch {
-      // Fallback: reload iframe with new mute state
       frame.src = buildHeroYoutubeSrc(currentKey, heroMuted);
     }
   }
@@ -358,13 +497,18 @@
     const activeIdx = idx;
     hero.classList.remove("swap"); void hero.offsetWidth; hero.classList.add("swap");
     const m = slides[idx];
+    const saved = getSavedProgress(m.type, m.id);
+    const watchLabel = saved
+      ? (m.type === "tv" ? "Continue S" + (saved.season || 1) + ":E" + (saved.episode || 1) : "Continue Watching")
+      : "Watch Now";
+
     $("#hero-bg").style.backgroundImage = "url(" + IMG + "w1280" + m.backdrop + ")";
     $("#hero-content").innerHTML =
       '<div class="eyebrow">Trending #' + (idx + 1) + " · " + typeLabel(m.type) + "</div><h1>" + esc(m.title) + "</h1>" +
       '<div class="chips">' + (m.rating ? "<span>" + ICONS.star + m.rating.toFixed(1) + "</span>" : "") + "<span>" + year(m.date) + "</span><span>" + typeLabel(m.type) + "</span></div>" +
       "<p>" + esc(m.overview) + "</p>" +
       '<div class="actions">' +
-      '<button class="btn-watch" data-watch data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + "Watch Now</button>" +
+      '<button class="btn-watch" data-watch data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + esc(watchLabel) + "</button>" +
       '<button class="pill-btn" data-detail data-type="' + m.type + '" data-id="' + m.id + '" type="button">Details</button>' +
       '<button class="btn-round" data-fav data-type="' + m.type + '" data-id="' + m.id + '" type="button" aria-label="Toggle my list">' + ICONS.heart + "</button>" +
       '<button class="btn-round" data-mute type="button" aria-label="Unmute trailer">' + ICONS.mute + "</button></div>";
@@ -396,49 +540,133 @@
 
   // ---------------- Dedicated Watch Scene (#player-modal) ----------------
   let selectedId = null, selectedType = "movie", playerSeasons = [];
+  let activeSeasonNum = 1, activeEpisodeNum = 1;
+  const seasonCache = {};
 
   function buildEmbedUrl(type, id, season = 1, episode = 1) {
     const cleanId = parseInt(id, 10);
     if (type === "tv") {
-      return EMBED_BASE + "/tv/" + cleanId + "/" + parseInt(season, 10) + "/" + parseInt(episode, 10);
+      return EMBED_BASE + "/tv/" + cleanId + "/" + parseInt(season, 10) + "/" + parseInt(episode, 10) + "?" + TV_EMBED_PARAMS;
     }
-    return EMBED_BASE + "/movie/" + cleanId;
+    return EMBED_BASE + "/movie/" + cleanId + "?" + MOVIE_EMBED_PARAMS;
   }
 
   function loadEmbedSrc(type, id, season = 1, episode = 1) {
-    const src = buildEmbedUrl(type, id, season, episode);
+    activeSeasonNum = Number(season) || 1;
+    activeEpisodeNum = Number(episode) || 1;
+
+    const src = buildEmbedUrl(type, id, activeSeasonNum, activeEpisodeNum);
     playerLoading.classList.remove("hidden");
     player.onload = () => playerLoading.classList.add("hidden");
     player.src = src;
 
-    if (type === "tv" && playerSeasons.length) {
-      const activeSeason = playerSeasons.find((s) => s.season_number === Number(season)) || playerSeasons[0];
-      const epCount = Math.max(1, activeSeason ? activeSeason.episode_count : 1);
-
-      const seasonOpts = playerSeasons
-        .map((s) => '<option value="' + s.season_number + '"' + (s.season_number === Number(season) ? " selected" : "") + ">Season " + s.season_number + "</option>")
-        .join("");
-
-      const epOpts = Array.from({ length: epCount }, (_, i) => i + 1)
-        .map((ep) => '<option value="' + ep + '"' + (ep === Number(episode) ? " selected" : "") + ">Episode " + ep + "</option>")
-        .join("");
-
+    if (type === "tv") {
       playerBar.innerHTML =
-        '<div class="player-selects">' +
-        '<select id="player-season" data-id="' + id + '" aria-label="Select season">' + seasonOpts + "</select>" +
-        '<select id="player-episode" data-id="' + id + '" aria-label="Select episode">' + epOpts + "</select>" +
-        "</div>";
+        '<span class="chips"><span>Playing Season ' + activeSeasonNum + " · Episode " + activeEpisodeNum + "</span></span>";
     } else {
-      playerBar.innerHTML = "";
+      playerBar.innerHTML = '<span class="chips"><span>Feature Film</span></span>';
+    }
+
+    // Highlight active episode card if rendered
+    $$(".ep-card", epGrid).forEach((card) => {
+      const isMatch = Number(card.dataset.season) === activeSeasonNum && Number(card.dataset.episode) === activeEpisodeNum;
+      card.classList.toggle("active", isMatch);
+      const badge = $(".ep-playing-badge", card);
+      if (isMatch && !badge) {
+        $(".ep-thumb", card)?.insertAdjacentHTML("beforeend", '<span class="ep-playing-badge">Playing</span>');
+      } else if (!isMatch && badge) {
+        badge.remove();
+      }
+    });
+
+    // Save initial watch state to Continue Watching
+    if (current && Number(current.id) === Number(id)) {
+      const existing = getSavedProgress(type, id);
+      upsertContinueItem({
+        id,
+        type,
+        title: current.title,
+        poster: current.poster,
+        backdrop: current.backdrop,
+        date: current.date,
+        rating: current.rating,
+        season: activeSeasonNum,
+        episode: activeEpisodeNum,
+        currentTime: existing?.currentTime || 0,
+        duration: existing?.duration || 0,
+      });
     }
   }
 
-  async function openPlayerScene(type, id) {
+  async function renderSeasonEpisodes(tvId, seasonNum) {
+    activeSeasonNum = Number(seasonNum);
+    $$(".season-pill", seasonPills).forEach((b) => b.classList.toggle("active", Number(b.dataset.seasonPill) === activeSeasonNum));
+    epGrid.innerHTML = '<div class="state"><div class="spinner"></div>Loading Season ' + activeSeasonNum + " episodes…</div>";
+
+    const cacheKey = tvId + ":" + activeSeasonNum;
+    let seasonData = seasonCache[cacheKey];
+    if (!seasonData) {
+      try {
+        seasonData = await api("/tv/" + tvId + "/season/" + activeSeasonNum);
+        seasonCache[cacheKey] = seasonData;
+      } catch {
+        seasonData = null;
+      }
+    }
+
+    const episodes = seasonData?.episodes || [];
+    const saved = getSavedProgress("tv", tvId);
+
+    if (!episodes.length) {
+      const fallbackInfo = playerSeasons.find((s) => s.season_number === activeSeasonNum);
+      const count = Math.max(1, fallbackInfo?.episode_count || 1);
+      epGrid.innerHTML = Array.from({ length: count }, (_, i) => i + 1).map((epNum) => {
+        const isPlaying = activeSeasonNum === Number(seasonNum) && activeEpisodeNum === epNum;
+        return (
+          '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + activeSeasonNum + '" data-episode="' + epNum + '">' +
+          '<div class="ep-body"><div class="ep-title">Episode ' + epNum + '</div><div class="ep-desc">Click to play Season ' + activeSeasonNum + ", Episode " + epNum + "</div></div></button>"
+        );
+      }).join("");
+      return;
+    }
+
+    seriesEpSummary.textContent = "Season " + activeSeasonNum + " · " + episodes.length + (episodes.length === 1 ? " Episode" : " Episodes");
+
+    epGrid.innerHTML = episodes.map((ep) => {
+      const epNum = ep.episode_number;
+      const isPlaying = activeSeasonNum === Number(seasonNum) && activeEpisodeNum === epNum;
+      const thumb = ep.still_path
+        ? '<img loading="lazy" src="' + IMG + "w300" + ep.still_path + '" alt="">'
+        : (current?.backdrop ? '<img loading="lazy" src="' + IMG + "w300" + current.backdrop + '" alt="">' : "");
+      const epSaved = saved?.episodes?.["s" + activeSeasonNum + "e" + epNum];
+      const pct = epSaved && epSaved.duration > 0 ? Math.min(98, Math.max(8, Math.round((epSaved.currentTime / epSaved.duration) * 100))) : 0;
+
+      return (
+        '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + activeSeasonNum + '" data-episode="' + epNum + '">' +
+        '<div class="ep-thumb">' +
+        thumb +
+        '<span class="ep-num-badge">E' + epNum + "</span>" +
+        (isPlaying ? '<span class="ep-playing-badge">Playing</span>' : "") +
+        (ep.runtime ? '<span class="ep-runtime">' + ep.runtime + "m</span>" : "") +
+        (pct > 0 ? '<div class="cw-bar"><div class="cw-bar-fill" style="width:' + pct + '%"></div></div>' : "") +
+        "</div>" +
+        '<div class="ep-body">' +
+        '<div class="ep-title">' + esc(ep.name || "Episode " + epNum) + "</div>" +
+        '<div class="ep-desc">' + esc(ep.overview || "No overview available for this episode.") + "</div>" +
+        "</div></button>"
+      );
+    }).join("");
+  }
+
+  async function openPlayerScene(type, id, initSeason = null, initEpisode = null) {
     selectedType = type;
-    selectedId = id;
+    selectedId = Number(id);
     playerSeasons = [];
 
-    // Hide any open overlays before showing the dedicated player scene
+    const saved = getSavedProgress(type, id);
+    const startSeason = initSeason ? Number(initSeason) : (saved?.season || 1);
+    const startEpisode = initEpisode ? Number(initEpisode) : (saved?.episode || 1);
+
     $$(".overlay").forEach((o) => { o.hidden = true; });
     $("#dt-body").innerHTML = "";
 
@@ -447,12 +675,14 @@
     playerModal.scrollTop = 0;
     setVideo(null);
 
-    loadEmbedSrc(type, id, 1, 1);
+    seriesBrowser.hidden = type !== "tv";
+    updateProgressBadgeUI(saved);
+    loadEmbedSrc(type, id, startSeason, startEpisode);
     detailsBox.innerHTML = '<div></div><div class="meta">Loading details…</div>';
 
     try {
       const m = await api("/" + type + "/" + id, { append_to_response: "videos,credits,watch/providers" });
-      if (selectedId !== id || selectedType !== type) return;
+      if (selectedId !== Number(id) || selectedType !== type) return;
 
       current = norm({ ...m, media_type: type }, type);
       const title = current.title;
@@ -461,9 +691,25 @@
         ? (m.number_of_seasons ? m.number_of_seasons + (m.number_of_seasons > 1 ? " seasons" : " season") : "")
         : (m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "");
 
+      // Save metadata to Continue Watching immediately
+      upsertContinueItem({
+        id: selectedId,
+        type: selectedType,
+        title: current.title,
+        poster: current.poster,
+        backdrop: current.backdrop,
+        date: current.date,
+        rating: current.rating,
+        season: activeSeasonNum,
+        episode: activeEpisodeNum,
+      });
+
       if (type === "tv") {
         playerSeasons = (m.seasons || []).filter((s) => s.season_number > 0);
-        loadEmbedSrc(type, id, 1, 1);
+        seasonPills.innerHTML = playerSeasons.map((s) =>
+          '<button type="button" class="season-pill' + (s.season_number === activeSeasonNum ? " active" : "") + '" data-season-pill="' + s.season_number + '" data-id="' + id + '">Season ' + s.season_number + "</button>"
+        ).join("");
+        renderSeasonEpisodes(id, activeSeasonNum);
       }
 
       const yt = (m.videos?.results || []).filter((v) => v.site === "YouTube");
@@ -485,7 +731,7 @@
         "</div>";
       syncFav();
     } catch (err) {
-      if (selectedId !== id || selectedType !== type) return;
+      if (selectedId !== Number(id) || selectedType !== type) return;
       detailsBox.innerHTML = "<div></div><div><h2>TMDB ID " + id + '</h2><div class="meta">Details unavailable (' + esc(err.message) + ") but the player is loaded.</div></div>";
     }
   }
@@ -496,6 +742,8 @@
     player.src = "about:blank";
     playerBar.innerHTML = "";
     detailsBox.innerHTML = "";
+    epGrid.innerHTML = "";
+    seriesBrowser.hidden = true;
     selectedId = null;
     if (!isOverlayOpen()) {
       document.body.classList.remove("no-scroll");
@@ -511,6 +759,10 @@
     try {
       const m = await api("/" + type + "/" + id, { append_to_response: "videos,credits,watch/providers" });
       current = norm({ ...m, media_type: type }, type);
+      const saved = getSavedProgress(type, id);
+      const watchBtnText = saved
+        ? (type === "tv" ? "Continue S" + (saved.season || 1) + ":E" + (saved.episode || 1) : "Continue (" + fmtTime(saved.currentTime) + ")")
+        : "Watch Now";
 
       const yt = (m.videos?.results || []).filter((v) => v.site === "YouTube");
       const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
@@ -523,7 +775,7 @@
         '<div class="dt-info"><h2>' + esc(current.title) + "</h2>" +
         '<div class="meta">' + [year(current.date), run, current.rating ? "<b>" + ICONS.star + current.rating.toFixed(1) + "</b>" : "", "TMDB ID " + m.id, typeLabel(type)].filter(Boolean).join(" · ") + "</div>" +
         '<div class="actions wrap">' +
-        '<button class="pill-btn strong" data-watch data-type="' + type + '" data-id="' + id + '" type="button">' + ICONS.play + "Watch Now</button>" +
+        '<button class="pill-btn strong" data-watch data-type="' + type + '" data-id="' + id + '" type="button">' + ICONS.play + esc(watchBtnText) + "</button>" +
         (pick ? '<button class="pill-btn" data-trailer="' + pick.key + '" type="button">' + ICONS.play + "Trailer</button>" : "") +
         '<button class="pill-btn" data-fav data-full="1" data-type="' + type + '" data-id="' + id + '" type="button"></button>' +
         '<button class="pill-btn" data-open="share" type="button">' + ICONS.share + "Share</button></div>" +
@@ -600,21 +852,23 @@
   $("#hero-prev").addEventListener("click", () => { showSlide(idx - 1); startTimer(); });
   $("#hero-next").addEventListener("click", () => { showSlide(idx + 1); startTimer(); });
   $("#close-player").addEventListener("click", closePlayerScene);
+
+  // Topbar Scene Switcher inside #player-modal
+  $("#player-home-logo").addEventListener("click", (e) => { e.preventDefault(); closePlayerScene(); showView("discover"); });
+  $("#scene-home").addEventListener("click", () => { closePlayerScene(); });
+  $("#scene-details").addEventListener("click", () => {
+    if (!selectedId) return;
+    const t = selectedType, i = selectedId;
+    closePlayerScene();
+    openDetail(t, i);
+  });
+  $("#scene-player").addEventListener("click", () => {
+    playerModal.scrollTo({ top: 0, behavior: "smooth" });
+  });
+
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeOverlays(); });
   window.addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", window.scrollY > 40), { passive: true });
   $$(".overlay").forEach((o) => o.addEventListener("click", (e) => { if (e.target === o) closeOverlay(o); }));
-  playerModal.addEventListener("click", (e) => { if (e.target === playerModal) closePlayerScene(); });
-
-  document.addEventListener("change", (e) => {
-    const t = e.target;
-    if (t.id === "player-season") {
-      loadEmbedSrc("tv", Number(t.dataset.id), Number(t.value), 1);
-    } else if (t.id === "player-episode") {
-      const seasonSel = $("#player-season");
-      const season = seasonSel ? Number(seasonSel.value) : 1;
-      loadEmbedSrc("tv", Number(t.dataset.id), season, Number(t.value));
-    }
-  });
 
   document.addEventListener("click", (e) => {
     const t = e.target;
@@ -622,6 +876,39 @@
     if (t.closest("[data-close]")) return closeOverlay(t.closest(".overlay"));
     const op = t.closest("[data-open]"); if (op) return openOverlay(op.dataset.open);
     if (t.closest("[data-mute]")) return toggleMute();
+
+    // Clear all continue watching
+    if (t.id === "cw-clear-all") {
+      saveContinueList([]);
+      refreshContinueRowDom();
+      return;
+    }
+    // Remove single continue watching item
+    const cwRem = t.closest("[data-cw-remove]");
+    if (cwRem) {
+      e.stopPropagation();
+      removeContinueItem(cwRem.dataset.type, Number(cwRem.dataset.id));
+      return;
+    }
+
+    // Season pill click in Series Player
+    const sPill = t.closest("[data-season-pill]");
+    if (sPill) {
+      renderSeasonEpisodes(Number(sPill.dataset.id), Number(sPill.dataset.seasonPill));
+      return;
+    }
+
+    // Individual Episode Card click in Series Player
+    const epCard = t.closest("[data-ep-select]");
+    if (epCard) {
+      const tvId = Number(epCard.dataset.id);
+      const sNum = Number(epCard.dataset.season);
+      const eNum = Number(epCard.dataset.episode);
+      loadEmbedSrc("tv", tvId, sNum, eNum);
+      playerModal.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+
     const fav = t.closest("[data-fav]");
     if (fav) {
       const id = Number(fav.dataset.id), type = fav.dataset.type;
@@ -630,7 +917,9 @@
     }
     const watch = t.closest("[data-watch]");
     if (watch) {
-      openPlayerScene(watch.dataset.type, Number(watch.dataset.id));
+      const s = watch.dataset.season ? Number(watch.dataset.season) : null;
+      const ep = watch.dataset.episode ? Number(watch.dataset.episode) : null;
+      openPlayerScene(watch.dataset.type, Number(watch.dataset.id), s, ep);
       return;
     }
     const tr = t.closest("[data-trailer]");
