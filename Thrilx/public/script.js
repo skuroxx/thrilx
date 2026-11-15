@@ -132,7 +132,7 @@
     list.unshift(merged);
     saveContinueList(list);
     updateProgressBadgeUI(merged);
-    if (view === "discover") refreshContinueRowDom();
+    if (view === "discover" && playerModal.hidden) refreshContinueRowDom();
   }
   function removeContinueItem(type, id) {
     const list = getContinueList().filter((x) => !(x.type === type && Number(x.id) === Number(id)));
@@ -158,9 +158,7 @@
     if (typeof event.data !== "string") return;
     try {
       const data = JSON.parse(event.data);
-      console.log("Progress:", data);
-
-      if (!selectedId) return;
+      if (!selectedId || playerModal.hidden || /youtube/.test(event.origin)) return;
 
       const payload = data.data || data;
       const currentTime = Number(payload.currentTime ?? payload.time ?? payload.progress ?? payload.watched ?? 0);
@@ -168,7 +166,8 @@
       const season = Number(payload.season ?? activeSeasonNum ?? 1);
       const episode = Number(payload.episode ?? activeEpisodeNum ?? 1);
 
-      if (currentTime > 0 || duration > 0 || payload.event === "timeupdate" || payload.type === "MEDIA_DATA") {
+      if ((currentTime > 0 || duration > 0 || payload.event === "timeupdate" || payload.type === "MEDIA_DATA") && Date.now() - lastSave > 4000) {
+        lastSave = Date.now();
         const epKey = "s" + season + "e" + episode;
         const episodesUpdate = selectedType === "tv"
           ? { [epKey]: { currentTime, duration, updatedAt: Date.now() } }
@@ -202,7 +201,7 @@
       const pct = it.duration > 0 ? Math.min(98, Math.max(6, Math.round((it.currentTime / it.duration) * 100))) : 25;
       const tag = it.type === "tv" ? "S" + (it.season || 1) + " · E" + (it.episode || 1) : "Movie";
       const timeStr = it.currentTime > 0
-        ? fmtTime(it.currentTime) + (it.duration > 0 ? " / " + fmtTime(it.duration) : "")
+        ? (it.duration > 0 ? Math.max(1, Math.round((it.duration - it.currentTime) / 60)) + "m left" : fmtTime(it.currentTime))
         : "Resume";
 
       return (
@@ -212,7 +211,7 @@
         '<div class="cw-thumb">' +
         (imgPath ? '<img loading="lazy" src="' + imgPath + '" alt="">' : "") +
         '<div class="cw-shade"></div>' +
-        '<div class="cw-play-badge">' + ICONS.play + "</div>" +
+        '<div class="cw-play-badge" style="--p:' + pct + '">' + ICONS.play + "</div>" +
         '<span class="cw-tag">' + esc(tag) + "</span>" +
         '<span class="cw-time">' + esc(timeStr) + "</span>" +
         '<div class="cw-bar"><div class="cw-bar-fill" style="width:' + pct + '%"></div></div>' +
@@ -325,7 +324,7 @@
     ] },
   };
 
-  let view = "discover", token = 0;
+  let view = "discover", token = 0, lastSave = 0;
 
   function setNav(name) {
     $$("#nav button, #menu-nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
@@ -340,7 +339,7 @@
   async function showView(name) {
     view = name; const t = ++token;
     closeOverlays(); setNav(name); $("#query").value = ""; results.innerHTML = "";
-    window.scrollTo({ top: 0 });
+    window.scrollTo({ top: 0, behavior: "instant" });
 
     if (name === "list") {
       showHero(false); viewTitle.textContent = "My list"; viewTitle.hidden = false;
@@ -373,7 +372,7 @@
       const list = clean(d.results, "movie").filter((m) => m.type === "movie" || m.type === "tv");
       results.innerHTML = list.length ? gridHtml(list) : stateHtml("No movies or series found for “" + esc(q) + "”. Check the spelling or try a shorter title.", "error");
       reveal($$(".grid", results));
-      window.scrollTo({ top: 0 });
+      window.scrollTo({ top: 0, behavior: "instant" });
     } catch (err) { if (t === token) results.innerHTML = stateHtml(esc(err.message), "error"); }
   }
 
@@ -388,52 +387,63 @@
     try {
       const d = await api("/" + type + "/" + id + "/videos");
       const yt = (d.results || []).filter((v) => v.site === "YouTube" && v.key);
-      const pick =
-        yt.find((v) => v.type === "Trailer" && v.official) ||
-        yt.find((v) => v.type === "Trailer") ||
-        yt.find((v) => v.type === "Teaser") ||
-        yt[0];
-      return (trailerCache[cacheKey] = pick ? pick.key : null);
+      const rank = (v) => (v.type === "Trailer" ? (v.official ? 0 : 1) : v.type === "Teaser" ? 2 : 3);
+      const keys = [...new Set(yt.sort((a, b) => rank(a) - rank(b)).map((v) => v.key))].slice(0, 4);
+      return (trailerCache[cacheKey] = keys.length ? keys : null);
     } catch {
       return (trailerCache[cacheKey] = null);
     }
   }
 
-  function buildHeroYoutubeSrc(key, muted) {
-    return (
-      "https://www.youtube.com/embed/" +
-      encodeURIComponent(key) +
-      "?autoplay=1&mute=" +
-      (muted ? "1" : "0") +
-      "&controls=0&loop=1&playlist=" +
-      encodeURIComponent(key) +
-      "&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3"
-    );
+  let ytPlayer = null, ytReady = false, ytKeys = [], ytTry = 0, ytTimer = null, ytSig = "";
+  function loadYT() {
+    if (window.YT && YT.Player) return Promise.resolve();
+    return new Promise((res) => {
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
+      if (!$("script[data-yt]")) {
+        const t = document.createElement("script");
+        t.src = "https://www.youtube.com/iframe_api"; t.dataset.yt = "1"; document.head.appendChild(t);
+      }
+    });
+  }
+  function playKey() {
+    const k = ytKeys[ytTry];
+    clearTimeout(ytTimer);
+    if (!k) { $("#hero-video").classList.remove("on"); return; }
+    ytPlayer.mute(); ytPlayer.loadVideoById(k);
+    ytTimer = setTimeout(nextKey, 9000);
+  }
+  function nextKey() { ytTry++; playKey(); }
+  function onYtState(e) {
+    if (e.data === 1) { clearTimeout(ytTimer); $("#hero-video").classList.add("on"); updateMuteButton(); }
+    else if (e.data === 0) { ytPlayer.seekTo(0); ytPlayer.playVideo(); }
   }
 
-  function setVideo(key) {
+  function setVideo(keys) {
     const box = $("#hero-video");
     if (!box) return;
-    if (!key || isOverlayOpen() || !heroVisible || hero.hidden) {
+    const ok = keys && keys.length && !isOverlayOpen() && heroVisible && !hero.hidden;
+    if (!ok) {
       box.classList.remove("on");
-      box.innerHTML = "";
-      box.dataset.key = "";
+      if (ytReady) { try { ytPlayer.pauseVideo(); } catch { /* ignore */ } }
+      if (!keys) ytSig = "";
       updateMuteButton();
       return;
     }
-    if (box.dataset.key === key && box.firstChild) return;
-    box.classList.remove("on");
-    box.dataset.key = key;
-    heroMuted = true;
-    updateMuteButton();
-
-    box.innerHTML =
-      '<iframe title="Trailer" allow="autoplay; encrypted-media" src="' +
-      buildHeroYoutubeSrc(key, true) +
-      '"></iframe>';
-    box.firstChild.addEventListener("load", () => {
-      box.classList.add("on");
-      updateMuteButton();
+    const sig = keys.join();
+    if (ytSig === sig && ytReady) { try { ytPlayer.playVideo(); } catch { /* ignore */ } return; }
+    ytSig = sig; ytKeys = keys; ytTry = 0; heroMuted = true;
+    box.classList.remove("on"); updateMuteButton();
+    loadYT().then(() => {
+      if (ytSig !== sig) return;
+      if (!ytPlayer) {
+        box.insertAdjacentHTML("afterbegin", '<div id="yt-hero"></div>');
+        ytPlayer = new YT.Player("yt-hero", {
+          playerVars: { autoplay: 1, mute: 1, controls: 0, modestbranding: 1, rel: 0, playsinline: 1, disablekb: 1, iv_load_policy: 3, origin: location.origin },
+          events: { onReady: () => { ytReady = true; playKey(); }, onStateChange: onYtState, onError: nextKey },
+        });
+      } else if (ytReady) playKey();
     });
   }
 
@@ -446,36 +456,11 @@
   }
 
   function toggleMute() {
-    if (!currentKey) return;
-    const box = $("#hero-video");
-    let frame = $("#hero-video iframe");
-    if (!frame && box) {
-      setVideo(currentKey);
-      frame = $("#hero-video iframe");
-    }
-    if (!frame) return;
-
+    if (!ytReady) return;
     heroMuted = !heroMuted;
+    if (heroMuted) ytPlayer.mute(); else { ytPlayer.unMute(); ytPlayer.setVolume(100); }
+    ytPlayer.playVideo();
     updateMuteButton();
-
-    try {
-      frame.contentWindow.postMessage(
-        JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
-        "*"
-      );
-      if (!heroMuted) {
-        frame.contentWindow.postMessage(
-          JSON.stringify({ event: "command", func: "setVolume", args: [100] }),
-          "*"
-        );
-        frame.contentWindow.postMessage(
-          JSON.stringify({ event: "command", func: "playVideo", args: [] }),
-          "*"
-        );
-      }
-    } catch {
-      frame.src = buildHeroYoutubeSrc(currentKey, heroMuted);
-    }
   }
 
   if ("IntersectionObserver" in window && hero) {
@@ -546,7 +531,7 @@
 
   // ---------------- Dedicated Watch Scene (#player-modal) ----------------
   let selectedId = null, selectedType = "movie", playerSeasons = [];
-  let activeSeasonNum = 1, activeEpisodeNum = 1;
+  let activeSeasonNum = 1, activeEpisodeNum = 1, browseSeason = 1, browseTok = 0;
   const seasonCache = {};
 
   function buildEmbedUrl(type, id, season = 1, episode = 1) {
@@ -588,8 +573,9 @@
       });
     }
 
-    if (current && Number(current.id) === Number(id)) {
-      const existing = getSavedProgress(type, id);
+    if (current && Number(current.id) === Number(id) && current.type === type) {
+      const prevSaved = getSavedProgress(type, id);
+      const existing = type === "tv" ? prevSaved?.episodes?.["s" + activeSeasonNum + "e" + activeEpisodeNum] : prevSaved;
       upsertContinueItem({
         id,
         type,
@@ -608,54 +594,55 @@
 
   async function renderSeasonEpisodes(tvId, seasonNum) {
     if (!epGrid) return;
-    activeSeasonNum = Number(seasonNum);
+    browseSeason = Number(seasonNum); const bt = ++browseTok;
     if (seasonPills) {
-      $$(".season-pill", seasonPills).forEach((b) => b.classList.toggle("active", Number(b.dataset.seasonPill) === activeSeasonNum));
+      $$(".season-pill", seasonPills).forEach((b) => b.classList.toggle("active", Number(b.dataset.seasonPill) === browseSeason));
     }
-    epGrid.innerHTML = '<div class="state"><div class="spinner"></div>Loading Season ' + activeSeasonNum + " episodes…</div>";
+    epGrid.innerHTML = '<div class="state"><div class="spinner"></div>Loading Season ' + browseSeason + " episodes…</div>";
 
-    const cacheKey = tvId + ":" + activeSeasonNum;
+    const cacheKey = tvId + ":" + browseSeason;
     let seasonData = seasonCache[cacheKey];
     if (!seasonData) {
       try {
-        seasonData = await api("/tv/" + tvId + "/season/" + activeSeasonNum);
+        seasonData = await api("/tv/" + tvId + "/season/" + browseSeason);
         seasonCache[cacheKey] = seasonData;
       } catch {
         seasonData = null;
       }
     }
 
+    if (bt !== browseTok) return;
     const episodes = seasonData?.episodes || [];
     const saved = getSavedProgress("tv", tvId);
 
     if (!episodes.length) {
-      const fallbackInfo = playerSeasons.find((s) => s.season_number === activeSeasonNum);
+      const fallbackInfo = playerSeasons.find((s) => s.season_number === browseSeason);
       const count = Math.max(1, fallbackInfo?.episode_count || 1);
       epGrid.innerHTML = Array.from({ length: count }, (_, i) => i + 1).map((epNum) => {
-        const isPlaying = activeSeasonNum === Number(seasonNum) && activeEpisodeNum === epNum;
+        const isPlaying = browseSeason === activeSeasonNum && activeEpisodeNum === epNum;
         return (
-          '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + activeSeasonNum + '" data-episode="' + epNum + '">' +
-          '<div class="ep-body"><div class="ep-title">Episode ' + epNum + '</div><div class="ep-desc">Click to play Season ' + activeSeasonNum + ", Episode " + epNum + "</div></div></button>"
+          '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + browseSeason + '" data-episode="' + epNum + '">' +
+          '<div class="ep-body"><div class="ep-title">Episode ' + epNum + '</div><div class="ep-desc">Click to play Season ' + browseSeason + ", Episode " + epNum + "</div></div></button>"
         );
       }).join("");
       return;
     }
 
     if (seriesEpSummary) {
-      seriesEpSummary.textContent = "Season " + activeSeasonNum + " · " + episodes.length + (episodes.length === 1 ? " Episode" : " Episodes");
+      seriesEpSummary.textContent = "Season " + browseSeason + " · " + episodes.length + (episodes.length === 1 ? " Episode" : " Episodes");
     }
 
     epGrid.innerHTML = episodes.map((ep) => {
       const epNum = ep.episode_number;
-      const isPlaying = activeSeasonNum === Number(seasonNum) && activeEpisodeNum === epNum;
+      const isPlaying = browseSeason === activeSeasonNum && activeEpisodeNum === epNum;
       const thumb = ep.still_path
         ? '<img loading="lazy" src="' + IMG + "w300" + ep.still_path + '" alt="">'
         : (current?.backdrop ? '<img loading="lazy" src="' + IMG + "w300" + current.backdrop + '" alt="">' : "");
-      const epSaved = saved?.episodes?.["s" + activeSeasonNum + "e" + epNum];
+      const epSaved = saved?.episodes?.["s" + browseSeason + "e" + epNum];
       const pct = epSaved && epSaved.duration > 0 ? Math.min(98, Math.max(8, Math.round((epSaved.currentTime / epSaved.duration) * 100))) : 0;
 
       return (
-        '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + activeSeasonNum + '" data-episode="' + epNum + '">' +
+        '<button type="button" class="ep-card' + (isPlaying ? " active" : "") + '" data-ep-select data-id="' + tvId + '" data-season="' + browseSeason + '" data-episode="' + epNum + '">' +
         '<div class="ep-thumb">' +
         thumb +
         '<span class="ep-num-badge">E' + epNum + "</span>" +
@@ -757,6 +744,7 @@
     if (epGrid) epGrid.innerHTML = "";
     if (seriesBrowser) seriesBrowser.hidden = true;
     selectedId = null;
+    if (view === "discover") refreshContinueRowDom();
     if (!isOverlayOpen()) {
       document.body.classList.remove("no-scroll");
       setVideo(currentKey);
@@ -832,6 +820,16 @@
   });
 
   // ---------------- Intro ----------------
+  const introBg = $("#intro-bg");
+  if (introBg) {
+    const word = "Thril<b>x</b> ";
+    introBg.innerHTML = Array.from({ length: 7 }, (_, i) =>
+      '<div class="ib-row' + (i % 2 ? " rev" : "") + '" style="--s:' + (46 + i * 7) + 's"><span>' + word.repeat(7) + '</span><span aria-hidden="true">' + word.repeat(7) + "</span></div>").join("");
+    intro.addEventListener("pointermove", (e) => {
+      introBg.style.setProperty("--px", ((e.clientX / innerWidth - .5) * 40).toFixed(1) + "px");
+      introBg.style.setProperty("--py", ((e.clientY / innerHeight - .5) * 24).toFixed(1) + "px");
+    });
+  }
   function hideIntro() {
     document.body.classList.add("ready"); intro.classList.add("leaving");
     setTimeout(() => {
@@ -860,7 +858,7 @@
   $("#open-list").addEventListener("click", () => showView("list"));
   $("#open-menu").addEventListener("click", () => openOverlay("menu"));
   $("#home-link").addEventListener("click", (e) => { e.preventDefault(); showView("discover"); });
-  $("#to-top").addEventListener("click", (e) => { e.preventDefault(); window.scrollTo({ top: 0 }); });
+  $("#to-top").addEventListener("click", (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: "instant" }); });
   $("#hero-prev").addEventListener("click", () => { showSlide(idx - 1); startTimer(); });
   $("#hero-next").addEventListener("click", () => { showSlide(idx + 1); startTimer(); });
   $("#close-player").addEventListener("click", closePlayerScene);
@@ -933,7 +931,7 @@
     const tr = t.closest("[data-trailer]");
     if (tr) {
       $("#dt-trailer").innerHTML = '<div class="trailer"><iframe title="Trailer" allow="autoplay; encrypted-media; fullscreen" allowfullscreen src="https://www.youtube-nocookie.com/embed/' +
-        encodeURIComponent(tr.dataset.trailer) + '?autoplay=1&rel=0"></iframe></div>';
+        encodeURIComponent(tr.dataset.trailer) + '?autoplay=1&rel=0&playsinline=1&origin=' + encodeURIComponent(location.origin) + '"></iframe></div><a class="prov-link" href="https://www.youtube.com/watch?v=' + encodeURIComponent(tr.dataset.trailer) + '" target="_blank" rel="noopener">Not playing? Watch on YouTube</a>';
       return;
     }
     const trPlayer = t.closest("[data-trailer-player]");
@@ -941,7 +939,7 @@
       const box = $("#player-trailer-box");
       if (box) {
         box.innerHTML = '<div class="trailer"><iframe title="Trailer" allow="autoplay; encrypted-media; fullscreen" allowfullscreen src="https://www.youtube-nocookie.com/embed/' +
-          encodeURIComponent(trPlayer.dataset.trailerPlayer) + '?autoplay=1&rel=0"></iframe></div>';
+          encodeURIComponent(trPlayer.dataset.trailerPlayer) + '?autoplay=1&rel=0&playsinline=1&origin=' + encodeURIComponent(location.origin) + '"></iframe></div><a class="prov-link" href="https://www.youtube.com/watch?v=' + encodeURIComponent(trPlayer.dataset.trailerPlayer) + '" target="_blank" rel="noopener">Not playing? Watch on YouTube</a>';
       }
       return;
     }
