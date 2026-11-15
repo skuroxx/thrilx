@@ -35,6 +35,11 @@
   };
   $$("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || ""));
 
+  
+  // Only the numeric TMDB ID is ever changed in this URL.
+  const EMBED_PREFIX = "https://vidstuck.cc/embed/movie/";
+
+
   // ---------------- Scroll reveal (skipped when the user prefers reduced motion) ----------------
   const io = "IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches
     ? new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.06, rootMargin: "0px 0px -30px 0px" })
