@@ -39,6 +39,39 @@
   // Only the numeric TMDB ID is ever changed in this URL.
   const EMBED_PREFIX = "https://vidstuck.cc/embed/movie/";
 
+  
+  // ---------------- Player ----------------
+  let selectedId = null;
+  async function selectMovie(id) {
+    selectedId = id;
+    const src = EMBED_PREFIX + String(parseInt(id, 10));
+    heroPaused = true; setVideo(null);
+    modal.hidden = false; document.body.classList.add("no-scroll"); modal.scrollTop = 0;
+    playerLoading.classList.remove("hidden");
+    player.onload = () => playerLoading.classList.add("hidden");
+    player.src = src;
+
+    const fallback = (note) => {
+      details.innerHTML = "<div></div><div><h2>TMDB ID " + id + '</h2><div class="meta">' + esc(note) + "</div></div>";
+    };
+    if (!HAS_KEY) return fallback("Loaded by ID. Add a TMDB API key to see movie details.");
+    details.innerHTML = '<div></div><div class="meta">Loading details…</div>';
+    try {
+      const m = await tmdb("/movie/" + id);
+      if (selectedId !== id) return;
+      const hours = m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "";
+      details.innerHTML =
+        "<div>" + (m.poster_path ? '<img src="' + IMG + "w342" + m.poster_path + '" alt="Poster for ' + esc(m.title) + '">' : "") + "</div>" +
+        "<div><h2>" + esc(m.title) + "</h2>" +
+        '<div class="meta">' + [year(m.release_date), hours, m.vote_average ? "<b>★ " + m.vote_average.toFixed(1) + "</b>" : "", "TMDB ID " + m.id].filter(Boolean).join(" · ") + "</div>" +
+        '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
+        '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div></div>";
+    } catch (err) {
+      if (selectedId !== id) return;
+      fallback("Details unavailable (" + err.message + ") but the player is loaded.");
+    }
+  }
+
 
   // ---------------- Scroll reveal (skipped when the user prefers reduced motion) ----------------
   const io = "IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches
