@@ -11,6 +11,9 @@
   // set this to its URL, e.g. "https://thrilx-api.your-name.workers.dev"
   const API_BASE = "/api/tmdb";
 
+  // Iframe embed base URL (from script 3)
+  const EMBED_BASE = "https://vidstuck.cc/embed";
+
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -34,98 +37,6 @@
     menu: svg(line('<path class="l1" d="M4 7h16"/><path class="l2" d="M4 12h16"/><path class="l3" d="M4 17h16"/>'), "menu-ic"),
   };
   $$("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || ""));
-
-  
-  // Only the numeric TMDB ID is ever changed in this URL.
-  const EMBED_PREFIX = "https://vidstuck.cc/embed/movie/";
-
-  
-  // ---------------- Player ----------------
-  let selectedId = null;
-  async function selectMovie(id) {
-    selectedId = id;
-    const src = EMBED_PREFIX + String(parseInt(id, 10));
-    heroPaused = true; setVideo(null);
-    modal.hidden = false; document.body.classList.add("no-scroll"); modal.scrollTop = 0;
-    playerLoading.classList.remove("hidden");
-    player.onload = () => playerLoading.classList.add("hidden");
-    player.src = src;
-
-    const fallback = (note) => {
-      details.innerHTML = "<div></div><div><h2>TMDB ID " + id + '</h2><div class="meta">' + esc(note) + "</div></div>";
-    };
-    if (!HAS_KEY) return fallback("Loaded by ID. Add a TMDB API key to see movie details.");
-    details.innerHTML = '<div></div><div class="meta">Loading details…</div>';
-    try {
-      const m = await tmdb("/movie/" + id);
-      if (selectedId !== id) return;
-      const hours = m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "";
-      details.innerHTML =
-        "<div>" + (m.poster_path ? '<img src="' + IMG + "w342" + m.poster_path + '" alt="Poster for ' + esc(m.title) + '">' : "") + "</div>" +
-        "<div><h2>" + esc(m.title) + "</h2>" +
-        '<div class="meta">' + [year(m.release_date), hours, m.vote_average ? "<b>★ " + m.vote_average.toFixed(1) + "</b>" : "", "TMDB ID " + m.id].filter(Boolean).join(" · ") + "</div>" +
-        '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
-        '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div></div>";
-    } catch (err) {
-      if (selectedId !== id) return;
-      fallback("Details unavailable (" + err.message + ") but the player is loaded.");
-    }
-  }
-  
-  // ---------------- Events ----------------
-  $("search-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const q = input.value.trim();
-    if (q) search(q, 1);
-  });
-
-  $("id-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const raw = $("manual-id").value.trim();
-    if (!/^\d+$/.test(raw)) {
-      hero.hidden = true; home.hidden = true;
-      setState("A TMDB ID is numbers only, for example 299534.", "error");
-      return;
-    }
-    selectMovie(parseInt(raw, 10));
-  });
-
-  $("home-link").addEventListener("click", (e) => { e.preventDefault(); resetHome(); });
-  $("close-player").addEventListener("click", closePlayer);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closePlayer(); });
-  window.addEventListener("scroll", () => topbar.classList.toggle("scrolled", window.scrollY > 40), { passive: true });
-
-  document.addEventListener("click", (e) => {
-    const t = e.target;
-    const play = t.closest("[data-play]");
-    if (play) return selectMovie(Number(play.dataset.play));
-    if (t.closest("[data-mute]")) return toggleMute();
-    const dot = t.closest("[data-slide]");
-    if (dot) { showSlide(Number(dot.dataset.slide)); return startTimer(); }
-    const pill = t.closest(".pill");
-    if (pill) {
-      document.querySelectorAll(".pill").forEach((p) => p.classList.toggle("active", p === pill));
-      const gid = Number(pill.dataset.genre);
-      if (gid === 0) return resetHome();
-      hero.hidden = !slides.length; return showGenre(gid, pill.textContent, 1);
-    }
-    const nav = t.closest("[data-scroll]");
-    if (nav) {
-      e.preventDefault();
-      if (home.hidden) resetHome();
-      const target = $(nav.dataset.scroll);
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
-    }
-    const card = t.closest(".card");
-    if (card) return selectMovie(Number(card.dataset.id));
-    if (t.id === "more") return showGenre(genreId, genreName, genrePage + 1);
-    if (t.id === "prev" || t.id === "next") return search(currentQuery, Number(t.dataset.page));
-  });
-
-  loadHome();
-})();
-
 
   // ---------------- Scroll reveal (skipped when the user prefers reduced motion) ----------------
   const io = "IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -288,7 +199,7 @@
       '<div class="eyebrow">Trending #' + (idx + 1) + "</div><h1>" + esc(m.title) + "</h1>" +
       '<div class="chips">' + (m.rating ? "<span>" + ICONS.star + m.rating.toFixed(1) + "</span>" : "") + "<span>" + year(m.date) + "</span><span>" + typeLabel(m.type) + "</span></div>" +
       "<p>" + esc(m.overview) + "</p>" +
-      '<div class="actions"><button class="btn-watch" data-detail data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + 'Where to watch</button>' +
+      '<div class="actions"><button class="btn-watch" data-detail data-autoplay="1" data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + 'Watch Now</button>' +
       '<button class="btn-round" data-fav data-type="' + m.type + '" data-id="' + m.id + '" type="button" aria-label="Toggle my list">' + ICONS.heart + "</button></div>";
     const next = [1, 2, 3, 4].map((n) => (idx + n) % slides.length).filter((n) => n !== idx);
     $("#hero-list").innerHTML = next.map((n) => {
@@ -304,14 +215,59 @@
     timer = setInterval(() => { if (!hero.hidden && !document.hidden && $("#detail").hidden) showSlide(idx + 1); }, 9000);
   }
 
+  // ---------------- Iframe Player (from script 3) ----------------
+  let currentSeasons = [];
+
+  function buildEmbedUrl(type, id, season = 1, episode = 1) {
+    const cleanId = parseInt(id, 10);
+    if (type === "tv") {
+      return EMBED_BASE + "/tv/" + cleanId + "/" + parseInt(season, 10) + "/" + parseInt(episode, 10);
+    }
+    return EMBED_BASE + "/movie/" + cleanId;
+  }
+
+  function renderPlayer(type, id, season = 1, episode = 1) {
+    const box = $("#dt-trailer");
+    if (!box) return;
+
+    let controlsHtml = "";
+    if (type === "tv" && currentSeasons.length) {
+      const activeSeason = currentSeasons.find((s) => s.season_number === Number(season)) || currentSeasons[0];
+      const epCount = Math.max(1, activeSeason ? activeSeason.episode_count : 1);
+
+      const seasonOpts = currentSeasons
+        .map((s) => '<option value="' + s.season_number + '"' + (s.season_number === Number(season) ? " selected" : "") + ">Season " + s.season_number + "</option>")
+        .join("");
+
+      const epOpts = Array.from({ length: epCount }, (_, i) => i + 1)
+        .map((ep) => '<option value="' + ep + '"' + (ep === Number(episode) ? " selected" : "") + ">Episode " + ep + "</option>")
+        .join("");
+
+      controlsHtml =
+        '<div class="actions wrap" style="margin-bottom: 12px;">' +
+        '<select id="player-season" class="pill-btn" data-id="' + id + '" aria-label="Select season">' + seasonOpts + "</select>" +
+        '<select id="player-episode" class="pill-btn" data-id="' + id + '" aria-label="Select episode">' + epOpts + "</select>" +
+        "</div>";
+    }
+
+    const src = buildEmbedUrl(type, id, season, episode);
+    box.innerHTML =
+      controlsHtml +
+      '<div class="trailer">' +
+      '<iframe id="embed-player" title="Video Player" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="origin" src="' + esc(src) + '"></iframe>' +
+      "</div>";
+  }
+
   // ---------------- Detail ----------------
   let current = null;
-  async function openDetail(type, id) {
+  async function openDetail(type, id, autoplay = false) {
     const body = $("#dt-body");
     body.innerHTML = spinner; openOverlay("detail");
     try {
       const m = await api("/" + type + "/" + id, { append_to_response: "videos,credits,watch/providers" });
       current = norm({ ...m, media_type: type }, type);
+      currentSeasons = type === "tv" ? (m.seasons || []).filter((s) => s.season_number > 0) : [];
+
       const yt = (m.videos?.results || []).filter((v) => v.site === "YouTube");
       const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
       const run = type === "tv"
@@ -332,11 +288,12 @@
       body.innerHTML =
         '<div class="dt-grid"><div class="dt-poster">' + (m.poster_path ? '<img src="' + IMG + "w500" + m.poster_path + '" alt="Poster for ' + esc(current.title) + '">' : "") + "</div>" +
         '<div class="dt-info"><h2>' + esc(current.title) + "</h2>" +
-        '<div class="meta">' + [year(current.date), run, current.rating ? "<b>" + ICONS.star + current.rating.toFixed(1) + "</b>" : "", typeLabel(type)].filter(Boolean).join(" · ") + "</div>" +
+        '<div class="meta">' + [year(current.date), run, current.rating ? "<b>" + ICONS.star + current.rating.toFixed(1) + "</b>" : "", "TMDB ID " + m.id, typeLabel(type)].filter(Boolean).join(" · ") + "</div>" +
         '<div class="actions wrap">' +
-        (pick ? '<button class="pill-btn strong" data-trailer="' + pick.key + '" type="button">' + ICONS.play + 'Trailer</button>' : "") +
+        '<button class="pill-btn strong" data-watch data-type="' + type + '" data-id="' + id + '" type="button">' + ICONS.play + "Watch Now</button>" +
+        (pick ? '<button class="pill-btn" data-trailer="' + pick.key + '" type="button">' + ICONS.play + "Trailer</button>" : "") +
         '<button class="pill-btn" data-fav data-full="1" data-type="' + type + '" data-id="' + id + '" type="button"></button>' +
-        '<button class="pill-btn" data-open="share" type="button">' + ICONS.share + 'Share</button></div>' +
+        '<button class="pill-btn" data-open="share" type="button">' + ICONS.share + "Share</button></div>" +
         '<div id="dt-trailer"></div>' +
         (m.tagline ? '<p class="tagline">' + esc(m.tagline) + "</p>" : "") +
         '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
@@ -344,6 +301,7 @@
         '<h3 class="sub">Where to watch in ' + REGION + "</h3>" + provHtml +
         (cast ? '<h3 class="sub">Cast</h3><div class="cast">' + cast + "</div>" : "") + "</div></div>";
       syncFav();
+      if (autoplay) renderPlayer(type, id, 1, 1);
     } catch (err) { body.innerHTML = stateHtml(esc(err.message), "error"); }
   }
 
@@ -396,6 +354,17 @@
   window.addEventListener("scroll", () => $("#topbar").classList.toggle("scrolled", window.scrollY > 40), { passive: true });
   $$(".overlay").forEach((o) => o.addEventListener("click", (e) => { if (e.target === o) closeOverlay(o); }));
 
+  document.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.id === "player-season") {
+      renderPlayer("tv", Number(t.dataset.id), Number(t.value), 1);
+    } else if (t.id === "player-episode") {
+      const seasonSel = $("#player-season");
+      const season = seasonSel ? Number(seasonSel.value) : 1;
+      renderPlayer("tv", Number(t.dataset.id), season, Number(t.value));
+    }
+  });
+
   document.addEventListener("click", (e) => {
     const t = e.target;
     const v = t.closest("[data-view]"); if (v) return showView(v.dataset.view);
@@ -407,6 +376,11 @@
       const it = current && current.id === id && current.type === type ? current : slides.find((s) => s.id === id && s.type === type) || getList().find((x) => x.id === id && x.type === type);
       return it && toggleFav(it);
     }
+    const watch = t.closest("[data-watch]");
+    if (watch) {
+      renderPlayer(watch.dataset.type, Number(watch.dataset.id), 1, 1);
+      return;
+    }
     const tr = t.closest("[data-trailer]");
     if (tr) {
       $("#dt-trailer").innerHTML = '<div class="trailer"><iframe title="Trailer" allow="autoplay; encrypted-media; fullscreen" allowfullscreen src="https://www.youtube-nocookie.com/embed/' +
@@ -414,7 +388,7 @@
       return;
     }
     const sl = t.closest("[data-slide]"); if (sl) { showSlide(Number(sl.dataset.slide)); return startTimer(); }
-    const d = t.closest("[data-detail]"); if (d) return openDetail(d.dataset.type, Number(d.dataset.id));
+    const d = t.closest("[data-detail]"); if (d) return openDetail(d.dataset.type, Number(d.dataset.id), d.dataset.autoplay === "1");
   });
 
   syncFav();
