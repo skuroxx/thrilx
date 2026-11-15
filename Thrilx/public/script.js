@@ -35,6 +35,8 @@
     search: svg(line('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>')),
     share: svg(line('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>')),
     menu: svg(line('<path class="l1" d="M4 7h16"/><path class="l2" d="M4 12h16"/><path class="l3" d="M4 17h16"/>'), "menu-ic"),
+    mute: svg(line('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>')),
+    unmute: svg(line('<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>')),
   };
   $$("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || ""));
 
@@ -50,6 +52,12 @@
 
   const hero = $("#hero"), main = $("#main"), home = $("#home"), results = $("#results"), viewTitle = $("#view-title");
   const spinner = '<div class="state"><div class="spinner"></div>Loading…</div>';
+
+  // Ensure #hero-video exists inside #hero (auto-injected if missing from HTML)
+  if (hero && !$("#hero-video")) {
+    const bg = $("#hero-bg");
+    if (bg) bg.insertAdjacentHTML("afterend", '<div id="hero-video" class="hero-video" aria-hidden="true"></div>');
+  }
 
   // ---------------- API (through the Worker proxy) ----------------
   async function api(path, params = {}) {
@@ -141,7 +149,11 @@
   function setNav(name) {
     $$("#nav button, #menu-nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   }
-  function showHero(on) { hero.hidden = !on; main.classList.toggle("nohero", !on); }
+  function showHero(on) {
+    hero.hidden = !on;
+    main.classList.toggle("nohero", !on);
+    if (!on) setVideo(null);
+  }
 
   async function showView(name) {
     view = name; const t = ++token;
@@ -182,25 +194,96 @@
     } catch (err) { if (t === token) results.innerHTML = stateHtml(esc(err.message), "error"); }
   }
 
-  // ---------------- Hero ----------------
+  // ---------------- Hero with Background Trailer (from script 3) ----------------
   let slides = [], idx = 0, timer = null;
+  let heroPaused = false, heroVisible = true, currentKey = null, heroMuted = true;
+  const trailerCache = {};
+
+  async function getTrailer(type, id) {
+    const cacheKey = type + ":" + id;
+    if (cacheKey in trailerCache) return trailerCache[cacheKey];
+    try {
+      const d = await api("/" + type + "/" + id + "/videos");
+      const yt = (d.results || []).filter((v) => v.site === "YouTube");
+      const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
+      return (trailerCache[cacheKey] = pick ? pick.key : null);
+    } catch {
+      return (trailerCache[cacheKey] = null);
+    }
+  }
+
+  function setVideo(key) {
+    const box = $("#hero-video");
+    if (!box) return;
+    if (!key || heroPaused || !heroVisible || hero.hidden) {
+      box.classList.remove("on");
+      box.innerHTML = "";
+      box.dataset.key = "";
+      return;
+    }
+    if (box.dataset.key === key && box.firstChild) return;
+    box.classList.remove("on");
+    box.dataset.key = key;
+    heroMuted = true;
+    updateMuteButton();
+    box.innerHTML =
+      '<iframe title="Trailer" allow="autoplay; encrypted-media" src="https://www.youtube.com/embed/' +
+      encodeURIComponent(key) +
+      "?autoplay=1&mute=1&controls=0&loop=1&playlist=" +
+      encodeURIComponent(key) +
+      '&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3"></iframe>';
+    box.firstChild.addEventListener("load", () => box.classList.add("on"));
+  }
+
+  function updateMuteButton() {
+    const b = $("[data-mute]");
+    if (b) {
+      b.innerHTML = heroMuted ? ICONS.mute : ICONS.unmute;
+      b.setAttribute("aria-label", heroMuted ? "Unmute trailer" : "Mute trailer");
+    }
+  }
+
+  function toggleMute() {
+    const frame = $("#hero-video iframe");
+    if (!frame) return;
+    heroMuted = !heroMuted;
+    frame.contentWindow.postMessage(
+      JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
+      "*"
+    );
+    updateMuteButton();
+  }
+
+  if ("IntersectionObserver" in window && hero) {
+    new IntersectionObserver(
+      (entries) => {
+        heroVisible = entries[0].isIntersecting;
+        setVideo(currentKey);
+      },
+      { threshold: 0.25 }
+    ).observe(hero);
+  }
+
   function setupHero(list) {
     slides = list.filter((m) => m.backdrop).slice(0, 6);
     if (!slides.length) return;
     $("#hero-dots").innerHTML = slides.map((_, i) => '<button class="dot" data-slide="' + i + '" type="button" aria-label="Slide ' + (i + 1) + '"></button>').join("");
     showHero(true); showSlide(0); startTimer();
   }
-  function showSlide(i) {
+
+  async function showSlide(i) {
     idx = (i + slides.length) % slides.length;
+    const activeIdx = idx;
     hero.classList.remove("swap"); void hero.offsetWidth; hero.classList.add("swap");
     const m = slides[idx];
     $("#hero-bg").style.backgroundImage = "url(" + IMG + "w1280" + m.backdrop + ")";
     $("#hero-content").innerHTML =
-      '<div class="eyebrow">Trending #' + (idx + 1) + "</div><h1>" + esc(m.title) + "</h1>" +
+      '<div class="eyebrow">Trending #' + (idx + 1) + " · " + typeLabel(m.type) + "</div><h1>" + esc(m.title) + "</h1>" +
       '<div class="chips">' + (m.rating ? "<span>" + ICONS.star + m.rating.toFixed(1) + "</span>" : "") + "<span>" + year(m.date) + "</span><span>" + typeLabel(m.type) + "</span></div>" +
       "<p>" + esc(m.overview) + "</p>" +
       '<div class="actions"><button class="btn-watch" data-detail data-autoplay="1" data-type="' + m.type + '" data-id="' + m.id + '" type="button">' + ICONS.play + 'Watch Now</button>' +
-      '<button class="btn-round" data-fav data-type="' + m.type + '" data-id="' + m.id + '" type="button" aria-label="Toggle my list">' + ICONS.heart + "</button></div>";
+      '<button class="btn-round" data-fav data-type="' + m.type + '" data-id="' + m.id + '" type="button" aria-label="Toggle my list">' + ICONS.heart + "</button>" +
+      '<button class="btn-round" data-mute type="button" aria-label="Unmute trailer">' + ICONS.mute + "</button></div>";
     const next = [1, 2, 3, 4].map((n) => (idx + n) % slides.length).filter((n) => n !== idx);
     $("#hero-list").innerHTML = next.map((n) => {
       const s = slides[n];
@@ -209,10 +292,22 @@
     }).join("");
     $$(".dot").forEach((d, n) => d.classList.toggle("active", n === idx));
     syncFav();
+
+    currentKey = null;
+    setVideo(null);
+    const key = await getTrailer(m.type, m.id);
+    if (idx !== activeIdx) return;
+    currentKey = key;
+    setVideo(key);
   }
+
   function startTimer() {
     clearInterval(timer);
-    timer = setInterval(() => { if (!hero.hidden && !document.hidden && $("#detail").hidden) showSlide(idx + 1); }, 9000);
+    timer = setInterval(() => {
+      if (!heroPaused && heroVisible && !hero.hidden && !document.hidden && $("#detail").hidden && slides.length > 1) {
+        showSlide(idx + 1);
+      }
+    }, 30000);
   }
 
   // ---------------- Iframe Player (from script 3) ----------------
@@ -309,12 +404,16 @@
   function openOverlay(id) {
     $$(".overlay").forEach((o) => { if (o.id !== id && !(id === "share" && o.id === "detail")) o.hidden = true; });
     $("#" + id).hidden = false; document.body.classList.add("no-scroll");
+    heroPaused = true; setVideo(null);
     const c = $("#" + id + " .close"); if (c) c.focus();
   }
   function closeOverlay(o) {
     o.hidden = true;
     if (o.id === "detail") $("#dt-body").innerHTML = "";
-    if (!$$(".overlay").some((x) => !x.hidden) && intro.hidden) document.body.classList.remove("no-scroll");
+    if (!$$(".overlay").some((x) => !x.hidden)) {
+      if (intro.hidden) document.body.classList.remove("no-scroll");
+      heroPaused = false; setVideo(currentKey);
+    }
   }
   const closeOverlays = () => $$(".overlay").forEach(closeOverlay);
 
@@ -370,6 +469,7 @@
     const v = t.closest("[data-view]"); if (v) return showView(v.dataset.view);
     if (t.closest("[data-close]")) return closeOverlay(t.closest(".overlay"));
     const op = t.closest("[data-open]"); if (op) return openOverlay(op.dataset.open);
+    if (t.closest("[data-mute]")) return toggleMute();
     const fav = t.closest("[data-fav]");
     if (fav) {
       const id = Number(fav.dataset.id), type = fav.dataset.type;
