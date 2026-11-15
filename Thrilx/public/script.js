@@ -2,14 +2,12 @@
   "use strict";
 
   // ---------------------------------------------------------------
-  // CONFIG (no secrets here: the TMDB key lives in the serverless function (api/tmdb) as the TMDB_KEY env var)
+  // CONFIG
   // ---------------------------------------------------------------
   const REGION = "IN";                 // ISO 3166-1 country code for "Where to watch"
   const CONTACT = "you@example.com";   // shown in the contact section
   const IMG = "https://image.tmdb.org/t/p/";
   const API_BASE = "/api/tmdb";
-
-  // Iframe embed base URL (from script 3)
   const EMBED_BASE = "https://vidstuck.cc/embed";
 
   const $ = (s, r = document) => r.querySelector(s);
@@ -18,7 +16,7 @@
   const year = (d) => (d ? d.slice(0, 4) : "TBA");
   const typeLabel = (t) => (t === "tv" ? "Series" : "Movie");
 
-  // ---------------- Vector icons (inline SVG, inherit text color) ----------------
+  // ---------------- Vector icons ----------------
   const svg = (inner, cls = "") => '<svg class="ic ' + cls + '" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + inner + "</svg>";
   const line = (inner) => '<g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">' + inner + "</g>";
   const HEART = "M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z";
@@ -38,7 +36,7 @@
   };
   $$("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon] || ""));
 
-  // ---------------- Scroll reveal (skipped when the user prefers reduced motion) ----------------
+  // ---------------- Scroll reveal ----------------
   const io = "IntersectionObserver" in window && !matchMedia("(prefers-reduced-motion: reduce)").matches
     ? new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { threshold: 0.06, rootMargin: "0px 0px -30px 0px" })
     : null;
@@ -49,16 +47,25 @@
   reveal($$(".band"));
 
   const hero = $("#hero"), main = $("#main"), home = $("#home"), results = $("#results"), viewTitle = $("#view-title");
+  const intro = $("#intro");
   const playerModal = $("#player-modal"), player = $("#player"), playerLoading = $("#player-loading"), playerBar = $("#player-bar"), detailsBox = $("#details");
   const spinner = '<div class="state"><div class="spinner"></div>Loading…</div>';
 
-  // Ensure #hero-video exists inside #hero
+  // Ensure #hero-video exists inside #hero right after #hero-bg
   if (hero && !$("#hero-video")) {
     const bg = $("#hero-bg");
     if (bg) bg.insertAdjacentHTML("afterend", '<div id="hero-video" class="hero-video" aria-hidden="true"></div>');
   }
 
-  // ---------------- API (through the Worker proxy) ----------------
+  // Live check: is any modal or intro currently covering the page?
+  function isOverlayOpen() {
+    const anyOverlay = $$(".overlay").some((o) => !o.hidden);
+    const playerOpen = playerModal && !playerModal.hidden;
+    const introOpen = intro && !intro.hidden;
+    return anyOverlay || playerOpen || introOpen;
+  }
+
+  // ---------------- API ----------------
   async function api(path, params = {}) {
     const url = new URL(API_BASE, location.origin);
     url.searchParams.set("path", path);
@@ -71,11 +78,16 @@
   }
 
   const norm = (m, fallbackType) => ({
-    id: m.id, type: m.media_type || fallbackType, title: m.title || m.name || "Untitled",
-    date: m.release_date || m.first_air_date || "", poster: m.poster_path, backdrop: m.backdrop_path,
-    rating: m.vote_average, overview: m.overview,
+    id: m.id,
+    type: m.media_type === "tv" || m.media_type === "movie" ? m.media_type : (m.first_air_date && !m.release_date ? "tv" : fallbackType || "movie"),
+    title: m.title || m.name || "Untitled",
+    date: m.release_date || m.first_air_date || "",
+    poster: m.poster_path,
+    backdrop: m.backdrop_path,
+    rating: m.vote_average,
+    overview: m.overview,
   });
-  const clean = (list, t) => list.filter((m) => m.media_type !== "person").map((m) => norm(m, t));
+  const clean = (list, t) => (list || []).filter((m) => m.media_type !== "person").map((m) => norm(m, t));
 
   // ---------------- My list (localStorage) ----------------
   const KEY = "thrilx-list";
@@ -113,6 +125,25 @@
     '<div class="row"><h3 class="row-title">' + esc(title) + '</h3><div class="row-scroll">' + list.map(cardHtml).join("") + "</div></div>";
   const gridHtml = (list) => '<div class="grid">' + list.map(cardHtml).join("") + "</div>";
   const stateHtml = (msg, cls = "") => '<div class="state ' + cls + '">' + msg + "</div>";
+
+  // Helper to build Cast & Where to Watch HTML for both Detail Modal and Watch Scene
+  function buildExtraDetailsHtml(m) {
+    const prov = m["watch/providers"]?.results?.[REGION];
+    const groups = [["flatrate", "Stream"], ["free", "Free"], ["ads", "Free with ads"], ["rent", "Rent"], ["buy", "Buy"]]
+      .filter(([k]) => prov && prov[k]?.length)
+      .map(([k, label]) => '<div class="prov-group"><span>' + label + "</span>" +
+        prov[k].map((p) => '<img src="' + IMG + "w92" + p.logo_path + '" alt="' + esc(p.provider_name) + '" title="' + esc(p.provider_name) + '">').join("") + "</div>").join("");
+    const provHtml = groups
+      ? groups + '<a class="prov-link" href="' + esc(prov.link) + '" target="_blank" rel="noopener">See every option and open links</a>'
+      : '<p class="meta">No listings for ' + REGION + " yet. Availability changes often, so check back later.</p>";
+
+    const cast = (m.credits?.cast || []).slice(0, 10).map((c) =>
+      '<div class="cast-item">' + (c.profile_path ? '<img loading="lazy" src="' + IMG + "w185" + c.profile_path + '" alt="">' : '<div class="cast-ph">' + esc(c.name[0]) + "</div>") +
+      "<b>" + esc(c.name) + "</b><small>" + esc(c.character || "") + "</small></div>").join("");
+
+    return '<h3 class="sub">Where to watch in ' + REGION + "</h3>" + provHtml +
+      (cast ? '<h3 class="sub">Cast</h3><div class="cast">' + cast + "</div>" : "");
+  }
 
   // ---------------- Views ----------------
   const anime = { with_genres: 16, with_original_language: "ja", sort_by: "popularity.desc" };
@@ -199,7 +230,7 @@
 
   // ---------------- Hero with Background Trailer (from script 3) ----------------
   let slides = [], idx = 0, timer = null;
-  let heroPaused = false, heroVisible = true, currentKey = null, heroMuted = true;
+  let heroVisible = true, currentKey = null, heroMuted = true;
   const trailerCache = {};
 
   async function getTrailer(type, id) {
@@ -219,13 +250,26 @@
     }
   }
 
+  function buildHeroYoutubeSrc(key, muted) {
+    return (
+      "https://www.youtube.com/embed/" +
+      encodeURIComponent(key) +
+      "?autoplay=1&mute=" +
+      (muted ? "1" : "0") +
+      "&controls=0&loop=1&playlist=" +
+      encodeURIComponent(key) +
+      "&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3"
+    );
+  }
+
   function setVideo(key) {
     const box = $("#hero-video");
     if (!box) return;
-    if (!key || heroPaused || !heroVisible || hero.hidden) {
+    if (!key || isOverlayOpen() || !heroVisible || hero.hidden) {
       box.classList.remove("on");
       box.innerHTML = "";
       box.dataset.key = "";
+      updateMuteButton();
       return;
     }
     if (box.dataset.key === key && box.firstChild) return;
@@ -234,35 +278,59 @@
     heroMuted = true;
     updateMuteButton();
 
-    const originParam = location.origin.startsWith("http") ? "&origin=" + encodeURIComponent(location.origin) : "";
     box.innerHTML =
-      '<iframe title="Trailer" allow="autoplay; encrypted-media" referrerpolicy="origin" src="https://www.youtube.com/embed/' +
-      encodeURIComponent(key) +
-      "?autoplay=1&mute=1&controls=0&loop=1&playlist=" +
-      encodeURIComponent(key) +
-      "&modestbranding=1&rel=0&playsinline=1&enablejsapi=1&disablekb=1&iv_load_policy=3" +
-      originParam +
+      '<iframe title="Trailer" allow="autoplay; encrypted-media" src="' +
+      buildHeroYoutubeSrc(key, true) +
       '"></iframe>';
-    box.firstChild.addEventListener("load", () => box.classList.add("on"));
+    box.firstChild.addEventListener("load", () => {
+      box.classList.add("on");
+      updateMuteButton();
+    });
   }
 
   function updateMuteButton() {
     const b = $("[data-mute]");
-    if (b) {
-      b.innerHTML = heroMuted ? ICONS.mute : ICONS.unmute;
-      b.setAttribute("aria-label", heroMuted ? "Unmute trailer" : "Mute trailer");
-    }
+    if (!b) return;
+    b.innerHTML = heroMuted ? ICONS.mute : ICONS.unmute;
+    b.setAttribute("aria-label", heroMuted ? "Unmute trailer" : "Mute trailer");
+    b.classList.toggle("on", !heroMuted);
   }
 
   function toggleMute() {
-    const frame = $("#hero-video iframe");
-    if (!frame || !frame.contentWindow) return;
+    if (!currentKey) return;
+    const box = $("#hero-video");
+    let frame = $("#hero-video iframe");
+
+    // If the trailer hasn't mounted yet, mount it first
+    if (!frame && box) {
+      setVideo(currentKey);
+      frame = $("#hero-video iframe");
+    }
+    if (!frame) return;
+
     heroMuted = !heroMuted;
-    frame.contentWindow.postMessage(
-      JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
-      "*"
-    );
     updateMuteButton();
+
+    // Send YouTube IFrame API command + volume=100
+    try {
+      frame.contentWindow.postMessage(
+        JSON.stringify({ event: "command", func: heroMuted ? "mute" : "unMute", args: [] }),
+        "*"
+      );
+      if (!heroMuted) {
+        frame.contentWindow.postMessage(
+          JSON.stringify({ event: "command", func: "setVolume", args: [100] }),
+          "*"
+        );
+        frame.contentWindow.postMessage(
+          JSON.stringify({ event: "command", func: "playVideo", args: [] }),
+          "*"
+        );
+      }
+    } catch {
+      // Fallback: reload iframe with new mute state
+      frame.src = buildHeroYoutubeSrc(currentKey, heroMuted);
+    }
   }
 
   if ("IntersectionObserver" in window && hero) {
@@ -320,13 +388,13 @@
   function startTimer() {
     clearInterval(timer);
     timer = setInterval(() => {
-      if (!heroPaused && heroVisible && !hero.hidden && !document.hidden && $("#detail").hidden && playerModal.hidden && slides.length > 1) {
+      if (!isOverlayOpen() && heroVisible && !hero.hidden && !document.hidden && slides.length > 1) {
         showSlide(idx + 1);
       }
     }, 30000);
   }
 
-  // ---------------- Dedicated Watch Scene (#player-modal from script 3) ----------------
+  // ---------------- Dedicated Watch Scene (#player-modal) ----------------
   let selectedId = null, selectedType = "movie", playerSeasons = [];
 
   function buildEmbedUrl(type, id, season = 1, episode = 1) {
@@ -374,22 +442,21 @@
     $$(".overlay").forEach((o) => { o.hidden = true; });
     $("#dt-body").innerHTML = "";
 
-    heroPaused = true;
-    setVideo(null);
-
     playerModal.hidden = false;
     document.body.classList.add("no-scroll");
     playerModal.scrollTop = 0;
+    setVideo(null);
 
     loadEmbedSrc(type, id, 1, 1);
     detailsBox.innerHTML = '<div></div><div class="meta">Loading details…</div>';
 
     try {
-      const m = await api("/" + type + "/" + id);
+      const m = await api("/" + type + "/" + id, { append_to_response: "videos,credits,watch/providers" });
       if (selectedId !== id || selectedType !== type) return;
 
-      const title = m.title || m.name || "Untitled";
-      const relDate = m.release_date || m.first_air_date || "";
+      current = norm({ ...m, media_type: type }, type);
+      const title = current.title;
+      const relDate = current.date;
       const run = type === "tv"
         ? (m.number_of_seasons ? m.number_of_seasons + (m.number_of_seasons > 1 ? " seasons" : " season") : "")
         : (m.runtime ? Math.floor(m.runtime / 60) + "h " + (m.runtime % 60) + "m" : "");
@@ -399,12 +466,24 @@
         loadEmbedSrc(type, id, 1, 1);
       }
 
+      const yt = (m.videos?.results || []).filter((v) => v.site === "YouTube");
+      const pick = yt.find((v) => v.type === "Trailer" && v.official) || yt.find((v) => v.type === "Trailer") || yt.find((v) => v.type === "Teaser");
+
       detailsBox.innerHTML =
         "<div>" + (m.poster_path ? '<img src="' + IMG + "w342" + m.poster_path + '" alt="Poster for ' + esc(title) + '">' : "") + "</div>" +
-        "<div><h2>" + esc(title) + "</h2>" +
+        '<div class="dt-info"><h2>' + esc(title) + "</h2>" +
         '<div class="meta">' + [year(relDate), run, m.vote_average ? "<b>" + ICONS.star + m.vote_average.toFixed(1) + "</b>" : "", "TMDB ID " + m.id, typeLabel(type)].filter(Boolean).join(" · ") + "</div>" +
+        '<div class="actions wrap">' +
+        (pick ? '<button class="pill-btn" data-trailer-player="' + pick.key + '" type="button">' + ICONS.play + "Official Trailer</button>" : "") +
+        '<button class="pill-btn" data-fav data-full="1" data-type="' + type + '" data-id="' + id + '" type="button"></button>' +
+        '<button class="pill-btn" data-open="share" type="button">' + ICONS.share + "Share</button></div>" +
+        '<div id="player-trailer-box"></div>' +
+        (m.tagline ? '<p class="tagline">' + esc(m.tagline) + "</p>" : "") +
         '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
-        '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div></div>";
+        '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div>" +
+        buildExtraDetailsHtml(m) +
+        "</div>";
+      syncFav();
     } catch (err) {
       if (selectedId !== id || selectedType !== type) return;
       detailsBox.innerHTML = "<div></div><div><h2>TMDB ID " + id + '</h2><div class="meta">Details unavailable (' + esc(err.message) + ") but the player is loaded.</div></div>";
@@ -416,10 +495,10 @@
     playerModal.hidden = true;
     player.src = "about:blank";
     playerBar.innerHTML = "";
+    detailsBox.innerHTML = "";
     selectedId = null;
-    if (!$$(".overlay").some((x) => !x.hidden) && intro.hidden) {
+    if (!isOverlayOpen()) {
       document.body.classList.remove("no-scroll");
-      heroPaused = false;
       setVideo(currentKey);
     }
   }
@@ -438,17 +517,6 @@
       const run = type === "tv"
         ? (m.number_of_seasons ? m.number_of_seasons + (m.number_of_seasons > 1 ? " seasons" : " season") : "")
         : (m.runtime ? m.runtime + " min" : "");
-      const cast = (m.credits?.cast || []).slice(0, 10).map((c) =>
-        '<div class="cast-item">' + (c.profile_path ? '<img loading="lazy" src="' + IMG + "w185" + c.profile_path + '" alt="">' : '<div class="cast-ph">' + esc(c.name[0]) + "</div>") +
-        "<b>" + esc(c.name) + "</b><small>" + esc(c.character || "") + "</small></div>").join("");
-      const prov = m["watch/providers"]?.results?.[REGION];
-      const groups = [["flatrate", "Stream"], ["free", "Free"], ["ads", "Free with ads"], ["rent", "Rent"], ["buy", "Buy"]]
-        .filter(([k]) => prov && prov[k]?.length)
-        .map(([k, label]) => '<div class="prov-group"><span>' + label + "</span>" +
-          prov[k].map((p) => '<img src="' + IMG + "w92" + p.logo_path + '" alt="' + esc(p.provider_name) + '" title="' + esc(p.provider_name) + '">').join("") + "</div>").join("");
-      const provHtml = groups
-        ? groups + '<a class="prov-link" href="' + esc(prov.link) + '" target="_blank" rel="noopener">See every option and open links</a>'
-        : '<p class="meta">No listings for ' + REGION + " yet. Availability changes often, so check back later.</p>";
 
       body.innerHTML =
         '<div class="dt-grid"><div class="dt-poster">' + (m.poster_path ? '<img src="' + IMG + "w500" + m.poster_path + '" alt="Poster for ' + esc(current.title) + '">' : "") + "</div>" +
@@ -463,8 +531,8 @@
         (m.tagline ? '<p class="tagline">' + esc(m.tagline) + "</p>" : "") +
         '<p class="overview">' + esc(m.overview || "No description available.") + "</p>" +
         '<div class="genres">' + (m.genres || []).map((g) => "<span>" + esc(g.name) + "</span>").join("") + "</div>" +
-        '<h3 class="sub">Where to watch in ' + REGION + "</h3>" + provHtml +
-        (cast ? '<h3 class="sub">Cast</h3><div class="cast">' + cast + "</div>" : "") + "</div></div>";
+        buildExtraDetailsHtml(m) +
+        "</div></div>";
       syncFav();
     } catch (err) { body.innerHTML = stateHtml(esc(err.message), "error"); }
   }
@@ -473,15 +541,15 @@
   function openOverlay(id) {
     $$(".overlay").forEach((o) => { if (o.id !== id && !(id === "share" && o.id === "detail")) o.hidden = true; });
     $("#" + id).hidden = false; document.body.classList.add("no-scroll");
-    heroPaused = true; setVideo(null);
+    setVideo(null);
     const c = $("#" + id + " .close"); if (c) c.focus();
   }
   function closeOverlay(o) {
     o.hidden = true;
     if (o.id === "detail") $("#dt-body").innerHTML = "";
-    if (!$$(".overlay").some((x) => !x.hidden) && playerModal.hidden) {
-      if (intro.hidden) document.body.classList.remove("no-scroll");
-      heroPaused = false; setVideo(currentKey);
+    if (!isOverlayOpen()) {
+      document.body.classList.remove("no-scroll");
+      setVideo(currentKey);
     }
   }
   const closeOverlays = () => {
@@ -500,14 +568,12 @@
   });
 
   // ---------------- Intro ----------------
-  const intro = $("#intro");
   function hideIntro() {
     document.body.classList.add("ready"); intro.classList.add("leaving");
     setTimeout(() => {
       intro.hidden = true;
-      if (!$$(".overlay").some((x) => !x.hidden) && playerModal.hidden) {
+      if (!isOverlayOpen()) {
         document.body.classList.remove("no-scroll");
-        heroPaused = false;
         setVideo(currentKey);
       }
     }, 800);
@@ -515,7 +581,12 @@
   }
   let seen = false;
   try { seen = sessionStorage.getItem("thrilx-intro") === "1"; } catch { /* ignore */ }
-  if (seen) { intro.hidden = true; document.body.classList.add("ready"); } else { document.body.classList.add("no-scroll"); heroPaused = true; }
+  if (seen) {
+    intro.hidden = true;
+    document.body.classList.add("ready");
+  } else {
+    document.body.classList.add("no-scroll");
+  }
   $("#enter").addEventListener("click", hideIntro);
   $("#skip-intro").addEventListener("click", hideIntro);
 
@@ -566,6 +637,15 @@
     if (tr) {
       $("#dt-trailer").innerHTML = '<div class="trailer"><iframe title="Trailer" allow="autoplay; encrypted-media; fullscreen" allowfullscreen src="https://www.youtube-nocookie.com/embed/' +
         encodeURIComponent(tr.dataset.trailer) + '?autoplay=1&rel=0"></iframe></div>';
+      return;
+    }
+    const trPlayer = t.closest("[data-trailer-player]");
+    if (trPlayer) {
+      const box = $("#player-trailer-box");
+      if (box) {
+        box.innerHTML = '<div class="trailer"><iframe title="Trailer" allow="autoplay; encrypted-media; fullscreen" allowfullscreen src="https://www.youtube-nocookie.com/embed/' +
+          encodeURIComponent(trPlayer.dataset.trailerPlayer) + '?autoplay=1&rel=0"></iframe></div>';
+      }
       return;
     }
     const sl = t.closest("[data-slide]"); if (sl) { showSlide(Number(sl.dataset.slide)); return startTimer(); }
